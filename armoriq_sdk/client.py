@@ -54,19 +54,34 @@ class ArmorIQClient:
     - Agent delegation
     
     Example:
+        >>> # Production (default endpoints)
         >>> client = ArmorIQClient(
-        ...     iap_endpoint="https://iap.example.com",
         ...     user_id="user123",
         ...     agent_id="my-agent"
         ... )
+        >>> 
+        >>> # Development/Local
+        >>> client = ArmorIQClient(
+        ...     iap_endpoint="http://localhost:8082",
+        ...     proxy_endpoint="http://localhost:3001",
+        ...     user_id="user123",
+        ...     agent_id="my-agent"
+        ... )
+        >>> 
         >>> plan = client.capture_plan("gpt-4", "Book a flight to Paris")
         >>> token = client.get_intent_token(plan)
         >>> result = client.invoke("travel-mcp", "book_flight", token)
     """
+    
+    # Production endpoints (default)
+    DEFAULT_IAP_ENDPOINT = "https://iap.armoriq.io"
+    DEFAULT_PROXY_ENDPOINT = "https://cloud-run-proxy.armoriq.io"
+    DEFAULT_CONMAP_ENDPOINT = "https://api.armoriq.io"
 
     def __init__(
         self,
         iap_endpoint: Optional[str] = None,
+        proxy_endpoint: Optional[str] = None,
         proxy_endpoints: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -75,13 +90,15 @@ class ArmorIQClient:
         max_retries: int = 3,
         verify_ssl: bool = True,
         api_key: Optional[str] = None,
+        use_production: bool = True,
     ):
         """
         Initialize ArmorIQ client.
         
         Args:
-            iap_endpoint: IAP service endpoint URL (or IAP_ENDPOINT env var)
-            proxy_endpoints: Dict mapping MCP names to proxy URLs
+            iap_endpoint: IAP service endpoint URL (defaults to production: https://iap.armoriq.io)
+            proxy_endpoint: Default proxy endpoint URL (defaults to production: https://cloud-run-proxy.armoriq.io)
+            proxy_endpoints: Dict mapping MCP names to specific proxy URLs
             user_id: User identifier (or USER_ID env var)
             agent_id: Agent identifier (or AGENT_ID env var)
             context_id: Optional context identifier
@@ -89,20 +106,53 @@ class ArmorIQClient:
             max_retries: Maximum retry attempts
             verify_ssl: Whether to verify SSL certificates
             api_key: Optional API key for authentication
+            use_production: Use production endpoints (default: True). Set False for local development.
             
         Raises:
             ConfigurationException: If required configuration is missing
+            
+        Environment Variables:
+            IAP_ENDPOINT: Override IAP endpoint
+            PROXY_ENDPOINT: Override default proxy endpoint
+            USER_ID: User identifier
+            AGENT_ID: Agent identifier
+            CONTEXT_ID: Context identifier (default: "default")
+            ARMORIQ_API_KEY: API key for authentication
+            ARMORIQ_ENV: Set to "development" to use local endpoints
         """
-        # Load from environment if not provided
-        self.iap_endpoint = iap_endpoint or os.getenv("IAP_ENDPOINT")
+        # Determine if using production based on environment
+        env_mode = os.getenv("ARMORIQ_ENV", "production").lower()
+        use_prod = use_production and (env_mode == "production")
+        
+        # Load IAP endpoint (priority: parameter > env var > default production/local)
+        if iap_endpoint:
+            self.iap_endpoint = iap_endpoint
+        elif os.getenv("IAP_ENDPOINT"):
+            self.iap_endpoint = os.getenv("IAP_ENDPOINT")
+        elif use_prod:
+            self.iap_endpoint = self.DEFAULT_IAP_ENDPOINT
+        else:
+            # Local development default
+            self.iap_endpoint = "http://localhost:8082"
+        
+        # Load proxy endpoint
+        if proxy_endpoint:
+            self.default_proxy_endpoint = proxy_endpoint
+        elif os.getenv("PROXY_ENDPOINT"):
+            self.default_proxy_endpoint = os.getenv("PROXY_ENDPOINT")
+        elif use_prod:
+            self.default_proxy_endpoint = self.DEFAULT_PROXY_ENDPOINT
+        else:
+            # Local development default
+            self.default_proxy_endpoint = "http://localhost:3001"
+        
+        # Load user/agent identifiers
         self.user_id = user_id or os.getenv("USER_ID")
         self.agent_id = agent_id or os.getenv("AGENT_ID")
         self.context_id = context_id or os.getenv("CONTEXT_ID", "default")
         self.api_key = api_key or os.getenv("ARMORIQ_API_KEY")
 
         # Validate required config
-        if not self.iap_endpoint:
-            raise ConfigurationException("iap_endpoint is required (set IAP_ENDPOINT env var)")
         if not self.user_id:
             raise ConfigurationException("user_id is required (set USER_ID env var)")
         if not self.agent_id:
@@ -129,8 +179,9 @@ class ArmorIQClient:
         self._token_cache: Dict[str, IntentToken] = {}
 
         logger.info(
-            f"ArmorIQ SDK initialized: user={self.user_id}, "
-            f"agent={self.agent_id}, iap={self.iap_endpoint}"
+            f"ArmorIQ SDK initialized: mode={'production' if use_prod else 'development'}, "
+            f"user={self.user_id}, agent={self.agent_id}, "
+            f"iap={self.iap_endpoint}, proxy={self.default_proxy_endpoint}"
         )
 
     def __enter__(self):
@@ -350,12 +401,12 @@ class ArmorIQClient:
         # Get proxy endpoint for this MCP
         proxy_url = self.proxy_endpoints.get(mcp)
         if not proxy_url:
-            # Try default proxy pattern
+            # Try environment variable for specific MCP
             proxy_url = os.getenv(f"{mcp.upper()}_PROXY_URL")
             if not proxy_url:
-                raise MCPInvocationException(
-                    f"No proxy endpoint configured for MCP '{mcp}'", mcp=mcp
-                )
+                # Fall back to default proxy endpoint
+                proxy_url = self.default_proxy_endpoint
+                logger.debug(f"Using default proxy endpoint for {mcp}: {proxy_url}")
 
         # Build IAM context from token
         iam_context = {}
@@ -388,10 +439,26 @@ class ArmorIQClient:
             "merkle_proof": merkle_proof,
         }
 
+        # Prepare headers with Authorization token
+        headers = {}
+        # Send the full token as JSON string for csrg-iap tokens
+        if intent_token.raw_token and isinstance(intent_token.raw_token, dict):
+            # For csrg-iap: send entire token structure as base64-encoded JSON
+            import base64
+            import json
+            token_json = json.dumps(intent_token.raw_token.get("token", {}))
+            token_b64 = base64.b64encode(token_json.encode()).decode()
+            headers["Authorization"] = f"Bearer {token_b64}"
+            # Also include the token in the payload for proxy processing
+            payload["csrg_token"] = intent_token.raw_token.get("token", {})
+        elif hasattr(intent_token, 'signature') and intent_token.signature:
+            # Fallback: send signature only
+            headers["Authorization"] = f"Bearer {intent_token.signature}"
+        
         # Call proxy
         try:
             start_time = datetime.now()
-            response = self.http_client.post(f"{proxy_url}/invoke", json=payload)
+            response = self.http_client.post(f"{proxy_url}/invoke", json=payload, headers=headers)
             execution_time = (datetime.now() - start_time).total_seconds()
 
             response.raise_for_status()

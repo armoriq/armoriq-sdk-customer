@@ -59,14 +59,56 @@ uv sync
 pip install -e ".[dev]"
 ```
 
+## Configuration
+
+### Production Endpoints (Default)
+
+The SDK automatically connects to ArmorIQ production services:
+
+- **IAP (Intent Assurance Plane)**: `https://iap.armoriq.io`
+- **Proxy Server**: `https://cloud-run-proxy.armoriq.io`
+- **ConMap API**: `https://api.armoriq.io`
+
+### Environment Variables
+
+Create a `.env` file or set environment variables:
+
+```bash
+# Required
+AGENT_ID=your-agent-id
+USER_ID=your-user-id
+
+# Optional - Override production endpoints
+# IAP_ENDPOINT=https://iap.armoriq.io
+# PROXY_ENDPOINT=https://cloud-run-proxy.armoriq.io
+
+# For local development
+# ARMORIQ_ENV=development  # Uses localhost endpoints
+```
+
+### Local Development
+
+For local testing with services running on localhost:
+
+```bash
+export ARMORIQ_ENV=development
+export AGENT_ID=test-agent
+export USER_ID=test-user
+```
+
+This automatically uses:
+- IAP: `http://localhost:8082`
+- Proxy: `http://localhost:3001`
+
 ## Quick Start
 
-```python
-from armoriq_sdk import ArmorIQClient, InvalidTokenException
+### Production Usage
 
-# Initialize the SDK
+```python
+from armoriq_sdk import ArmorIQClient
+
+# Production (uses default endpoints)
 client = ArmorIQClient(
-    iap_endpoint="https://iap.armoriq.example.com",
     user_id="user123",
     agent_id="my-agent"
 )

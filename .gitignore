@@ -48,6 +48,38 @@ htmlcov/
 .env
 .env.local
 
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Documentation builds
+docs/_build/
+site/
+
+# Internal test files (keep test suite in tests/)
+test_csrg_direct.py
+test_iap_direct.py
+test_integration.py
+test_architecture_validation.py
+test_config.py
+test_endpoints.py
+test_local_integration.py
+verify_architecture.py
+
+# Internal documentation (development/progress tracking)
+docs/internal/
+ENDPOINT_CONFIG_SUMMARY.md
+PRODUCTION_READY.md
+BANNER.md
+
+# Temporary files
+*.tmp
+*.bak
+.cache/
+
 # Logs
 *.log
 
