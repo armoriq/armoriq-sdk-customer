@@ -5,15 +5,22 @@ All notable changes to ArmorIQ SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-01-13
+## [0.1.0] - 2026-01-16
 
 ### Added
-- Initial SDK implementation
+- Initial beta release of ArmorIQ SDK
 - Core `ArmorIQClient` class with CSRG-IAP integration
-- `capture_plan()` API for plan canonicalization
-- `get_intent_token()` API for token acquisition from IAP
-- `invoke()` API for MCP action invocation through proxy
-- `delegate()` API for agent-to-agent delegation
+- Production endpoints configured by default:
+  - IAP: `https://iap.armoriq.io`
+  - Proxy: `https://cloud-run-proxy.armoriq.io`
+  - ConMap: `https://api.armoriq.io`
+- Automatic environment detection (`ARMORIQ_ENV`)
+- Flexible endpoint configuration (env vars, parameters, per-MCP)
+- Core APIs:
+  - `capture_plan()` - Plan canonicalization with CSRG
+  - `get_intent_token()` - Token acquisition from IAP with Ed25519 signatures
+  - `invoke()` - MCP action invocation through proxy
+  - `delegate()` - Agent-to-agent delegation with public key cryptography
 - Custom exceptions:
   - `InvalidTokenException`
   - `IntentMismatchException`
