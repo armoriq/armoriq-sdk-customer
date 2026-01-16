@@ -19,70 +19,124 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual environments
 .venv/
 venv/
 ENV/
 env/
+.python-version
 
-# IDE
+# IDE & Editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.vim/
+.emacs.d/
 
 # Testing
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 .tox/
 .hypothesis/
+*.cover
+.cache
+nosetests.xml
+coverage.xml
+*.pytest_cache
 
 # Type checking
 .mypy_cache/
 .pytype/
+.pyre/
+.dmypy.json
+dmypy.json
 
-# Environment
+# Environment & Secrets
 .env
 .env.local
+.env.*
+*.key
+*.pem
+secrets/
 
 # OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+Desktop.ini
 
 # Logs
 *.log
+logs/
+*.log.*
 
 # Documentation builds
 docs/_build/
+docs/_static/
 site/
-
-# Internal test files (keep test suite in tests/)
-test_csrg_direct.py
-test_iap_direct.py
-test_integration.py
-test_architecture_validation.py
-test_config.py
-test_endpoints.py
-test_local_integration.py
-verify_architecture.py
+_build/
 
 # Internal documentation (development/progress tracking)
+# These are kept for internal development but not published
 docs/internal/
+VERIFICATION_REPORT.md
 ENDPOINT_CONFIG_SUMMARY.md
-PRODUCTION_READY.md
 BANNER.md
+
+# Test files (organized in tests/ directory)
+# Integration tests
+tests/integration/
+tests/production/
+tests/examples/
+
+# Keep only unit tests in repo
+!tests/test_*.py
+!tests/conftest.py
+!tests/__init__.py
 
 # Temporary files
 *.tmp
 *.bak
+*.swp
+*~
 .cache/
+tmp/
+temp/
 
-# Logs
-*.log
+# Build artifacts
+*.whl
+*.tar.gz
+dist/
+build/
 
-# OS
-.DS_Store
-Thumbs.db
+# PyInstaller
+*.spec
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.backup
+*~
+\#*\#
+.\#*
