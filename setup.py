@@ -11,13 +11,13 @@ long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists
 
 setup(
     name="armoriq-sdk",
-    version="0.1.0",
+    version="0.1.1",
     author="ArmorIQ Team",
     author_email="support@armoriq.io",
     description="Python SDK for ArmorIQ Intent Assurance Plane - Build secure AI agents with cryptographic verification",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/armoriq/armoriq-sdk-python",
+    url="https://armoriq.ai",
     project_urls={
         "Documentation": "https://docs.armoriq.io",
         "Source Code": "https://github.com/armoriq/armoriq-sdk-python",

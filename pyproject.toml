@@ -1,10 +1,11 @@
 [project]
 name = "armoriq-sdk"
-version = "0.1.0"
+version = "0.1.1"
 description = "ArmorIQ SDK for intent-based agent development with CSRG-IAP integration"
 authors = [
-    {name = "ArmorIQ Team"}
+    {name = "ArmorIQ Team", email = "support@armoriq.io"}
 ]
+urls = { "Homepage" = "https://armoriq.ai", "Repository" = "https://github.com/armoriq/armoriq-sdk-python" }
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
