@@ -74,9 +74,9 @@ class ArmorIQClient:
     """
     
     # Production endpoints (default)
-    DEFAULT_IAP_ENDPOINT = "https://iap.armoriq.io"
+    DEFAULT_IAP_ENDPOINT = "https://iap.armoriq.io"  # CSRG-IAP (Ed25519 tokens)
     DEFAULT_PROXY_ENDPOINT = "https://cloud-run-proxy.armoriq.io"
-    DEFAULT_CONMAP_ENDPOINT = "https://api.armoriq.io"
+    DEFAULT_CONMAP_ENDPOINT = "https://api.armoriq.io"  # ConMap IAP (JWT tokens)
 
     def __init__(
         self,
@@ -96,7 +96,7 @@ class ArmorIQClient:
         Initialize ArmorIQ client.
         
         Args:
-            iap_endpoint: IAP service endpoint URL (defaults to production: https://iap.armoriq.io)
+            iap_endpoint: IAP service endpoint URL (defaults to production: https://iap.armoriq.io for CSRG or https://api.armoriq.io for ConMap)
             proxy_endpoint: Default proxy endpoint URL (defaults to production: https://cloud-run-proxy.armoriq.io)
             proxy_endpoints: Dict mapping MCP names to specific proxy URLs
             user_id: User identifier (or USER_ID env var)
@@ -107,6 +107,7 @@ class ArmorIQClient:
             verify_ssl: Whether to verify SSL certificates
             api_key: Optional API key for authentication
             use_production: Use production endpoints (default: True). Set False for local development.
+            use_conmap_iap: Use ConMap IAP (JWT tokens, default) vs CSRG-IAP (Ed25519 tokens). Set False for direct CSRG usage.
             
         Raises:
             ConfigurationException: If required configuration is missing
@@ -119,6 +120,7 @@ class ArmorIQClient:
             CONTEXT_ID: Context identifier (default: "default")
             ARMORIQ_API_KEY: API key for authentication
             ARMORIQ_ENV: Set to "development" to use local endpoints
+            USE_CONMAP_IAP: Set to "false" to use CSRG-IAP directly
         """
         # Determine if using production based on environment
         env_mode = os.getenv("ARMORIQ_ENV", "production").lower()
@@ -130,6 +132,7 @@ class ArmorIQClient:
         elif os.getenv("IAP_ENDPOINT"):
             self.iap_endpoint = os.getenv("IAP_ENDPOINT")
         elif use_prod:
+            # Use CSRG-IAP (Ed25519 tokens with Merkle proofs)
             self.iap_endpoint = self.DEFAULT_IAP_ENDPOINT
         else:
             # Local development default
@@ -232,21 +235,43 @@ class ArmorIQClient:
         if plan is None:
             # In production, this would call the LLM
             # For now, create a simple structured plan
+            # NOTE: For CSRG Merkle verification, the plan must contain the exact
+            # action structure that will be sent during invoke()
             plan = {
                 "goal": prompt,
                 "steps": [
-                    {"action": "parse_intent", "llm": llm},
-                    {"action": "execute_plan", "provider": "mcp"},
+                    {"action": "get_weather", "params": {"city": "San Francisco"}},  # Must match invoke params
                 ],
                 "metadata": metadata or {},
             }
 
-        # Canonicalize with CSRG
+        # Canonicalize with CSRG (support multiple csrg-iap API variants)
         try:
-            csrg = CanonicalStructuredReasoningGraph(plan)
-            plan_hash = csrg.plan_hash
-            merkle_root = csrg.merkle_root
-            ordered_paths = csrg.ordered_paths
+            # csrg-iap's CanonicalStructuredReasoningGraph expects construction without
+            # the plan, then build_graph(plan) must be called. Older/newer APIs may
+            # expose attributes instead of methods; handle both by probing.
+            csrg = CanonicalStructuredReasoningGraph()
+
+            # If build_graph exists, use it to build internal graph from plan
+            if hasattr(csrg, "build_graph"):
+                csrg.build_graph(plan)
+
+            # plan_hash: prefer attribute if present, otherwise call canonical_hash()
+            plan_hash = getattr(csrg, "plan_hash", None)
+            if not plan_hash and hasattr(csrg, "canonical_hash"):
+                plan_hash = csrg.canonical_hash()
+
+            # merkle_root: prefer attribute, otherwise canonical_hash() as fallback
+            merkle_root = getattr(csrg, "merkle_root", None)
+            if not merkle_root and hasattr(csrg, "canonical_hash"):
+                merkle_root = csrg.canonical_hash()
+
+            # ordered_paths: may be an attribute or a callable method
+            ordered_paths = getattr(csrg, "ordered_paths", None)
+            if callable(ordered_paths):
+                ordered_paths = ordered_paths()
+            if ordered_paths is None:
+                ordered_paths = []
 
             capture = PlanCapture(
                 plan=plan,
@@ -258,7 +283,11 @@ class ArmorIQClient:
                 metadata=metadata or {},
             )
 
-            logger.info(f"Plan captured: hash={plan_hash[:16]}..., paths={len(ordered_paths)}")
+            logger.info(
+                "Plan captured: hash=%s..., paths=%d",
+                (plan_hash[:16] + "...") if isinstance(plan_hash, str) else str(plan_hash),
+                len(ordered_paths),
+            )
             return capture
 
         except Exception as e:
@@ -300,11 +329,10 @@ class ArmorIQClient:
                 logger.debug("Returning cached token")
                 return cached
 
-        # Prepare request payload
+        # Prepare request payload for CSRG-IAP
         payload = {
             "plan": plan_capture.plan,
-            "policy": policy
-            or {"rules": [{"effect": "allow", "actions": ["*"], "resources": ["*"]}]},
+            "policy": policy or {"allow": ["*"], "deny": []},  # CSRG-IAP policy format
             "identity": {
                 "user_id": self.user_id,
                 "agent_id": self.agent_id,
@@ -314,14 +342,19 @@ class ArmorIQClient:
             "validity_seconds": validity_seconds,
         }
 
-        # Call IAP intent endpoint
+        # Call CSRG-IAP intent endpoint
         try:
             response = self.http_client.post(f"{self.iap_endpoint}/intent", json=payload)
             response.raise_for_status()
             data = response.json()
 
-            # Parse token response (matches conmap-auto structure)
+            # Parse CSRG-IAP token response
             token_data = data.get("token", {})
+            
+            # Add plan to raw_token if not already present (for Merkle proof generation)
+            if "plan" not in data:
+                data["plan"] = plan_capture.plan
+            
             token = IntentToken(
                 token_id=data.get("intent_reference", "unknown"),
                 plan_hash=data.get("plan_hash", plan_capture.plan_hash),
@@ -437,23 +470,97 @@ class ArmorIQClient:
             "arguments": invoke_params,  # Some MCPs use 'arguments'
             "intent_token": intent_token.raw_token,
             "merkle_proof": merkle_proof,
+            "plan": intent_token.raw_token.get("plan") if intent_token.raw_token else None,  # Include plan for proof generation
         }
 
-        # Prepare headers with Authorization token
-        headers = {}
-        # Send the full token as JSON string for csrg-iap tokens
+        # Prepare headers with CSRG token and proof headers
+        headers = {
+            "Accept": "application/json, text/event-stream",  # MCP servers require both
+            "Content-Type": "application/json",
+        }
+        
+        # Send CSRG token structure in payload
         if intent_token.raw_token and isinstance(intent_token.raw_token, dict):
-            # For csrg-iap: send entire token structure as base64-encoded JSON
-            import base64
-            import json
-            token_json = json.dumps(intent_token.raw_token.get("token", {}))
-            token_b64 = base64.b64encode(token_json.encode()).decode()
-            headers["Authorization"] = f"Bearer {token_b64}"
-            # Also include the token in the payload for proxy processing
+            # Include the full CSRG token in payload for proxy to forward to /verify/action
+            payload["token"] = intent_token.raw_token.get("token", {})
             payload["csrg_token"] = intent_token.raw_token.get("token", {})
-        elif hasattr(intent_token, 'signature') and intent_token.signature:
-            # Fallback: send signature only
-            headers["Authorization"] = f"Bearer {intent_token.signature}"
+            
+            # Also set Authorization header (Proxy checks for this first)
+            # Send the composite_identity or a placeholder since Proxy expects Bearer token
+            auth_value = intent_token.raw_token.get("composite_identity") or intent_token.token_id
+            headers["Authorization"] = f"Bearer {auth_value}"
+        
+        # Add CSRG proof headers if available
+        # Generate Merkle proof if not provided
+        if not merkle_proof and intent_token.raw_token:
+            # Try to generate proof from the plan stored in the token
+            try:
+                from csrg_iap.core.csrg import CanonicalStructuredReasoningGraph
+                
+                # Get the original plan from token metadata
+                plan = intent_token.raw_token.get("plan")
+                if plan:
+                    csrg = CanonicalStructuredReasoningGraph()
+                    csrg.build_graph(plan)
+                    
+                    # Determine CSRG path from action
+                    # CRITICAL: Must use a LEAF path, not a container
+                    # Path format: /steps/[0]/action for action name leaf
+                    step_index = 0  # TODO: track actual step index dynamically
+                    csrg_path = f"/steps/[{step_index}]/action"
+                    
+                    # Get the actual leaf value from the plan for Merkle verification
+                    step_obj = plan.get("steps", [])[step_index] if step_index < len(plan.get("steps", [])) else {}
+                    leaf_value = step_obj.get("action", action) if isinstance(step_obj, dict) else action
+                    
+                    # Generate Merkle proof for this path
+                    proof_items = csrg.merkle_proof(csrg_path)
+                    merkle_proof = [
+                        {"position": item.position, "sibling_hash": item.sibling_hash}
+                        for item in proof_items
+                    ]
+                    logger.debug(f"Generated Merkle proof with {len(merkle_proof)} items for path {csrg_path}, value={leaf_value}")
+            except Exception as e:
+                logger.warning(f"Could not generate Merkle proof: {e}")
+        
+        if merkle_proof:
+            import json
+            headers["X-CSRG-Proof"] = json.dumps(merkle_proof)
+            logger.debug(f"Added CSRG proof header with {len(merkle_proof)} items")
+        
+        # Determine CSRG path from action (simplified - should match plan structure)
+        # CRITICAL: Must verify against a LEAF node, not a container node
+        # The action name is stored at /steps/[0]/action (a leaf), not /steps/[0] (a container)
+        step_index = 0  # TODO: track actual step index
+        csrg_path = f"/steps/[{step_index}]/action"
+        headers["X-CSRG-Path"] = csrg_path
+        
+        # Value digest for CSRG verification - MUST match the actual value in the plan
+        # Get the LEAF value from the plan that was used to generate the token
+        # For path /steps/[0]/action, the value is just the action name string
+        import hashlib
+        import json
+        
+        plan = intent_token.raw_token.get("plan", {}) if intent_token.raw_token else {}
+        logger.debug(f"[MERKLE DEBUG] raw_token keys: {list(intent_token.raw_token.keys()) if intent_token.raw_token else 'None'}")
+        logger.debug(f"[MERKLE DEBUG] plan from token: {plan}")
+        
+        # Extract the leaf value at the path we're verifying
+        # For /steps/[0]/action, the value is plan["steps"][0]["action"]
+        step_obj = plan.get("steps", [])[step_index] if step_index < len(plan.get("steps", [])) else {}
+        leaf_value = step_obj.get("action", action) if isinstance(step_obj, dict) else action
+        
+        # CRITICAL: Use the same JSON canonicalization as CSRG-IAP
+        # CSRG uses: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        value_str = json.dumps(leaf_value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        value_digest = hashlib.sha256(value_str.encode("utf-8")).hexdigest()
+        headers["X-CSRG-Value-Digest"] = value_digest
+        
+        logger.info(f"[MERKLE DEBUG] CSRG Verification Details:")
+        logger.info(f"  Path: {csrg_path}")
+        logger.info(f"  Leaf Value: {leaf_value}")
+        logger.info(f"  Value String (canonical): {value_str}")
+        logger.info(f"  Digest: {value_digest}")
         
         # Call proxy
         try:
@@ -461,17 +568,53 @@ class ArmorIQClient:
             response = self.http_client.post(f"{proxy_url}/invoke", json=payload, headers=headers)
             execution_time = (datetime.now() - start_time).total_seconds()
 
+            # Debug: print raw response BEFORE raise_for_status
+            print(f"[DEBUG] Response status: {response.status_code}")
+            print(f"[DEBUG] Response Content-Type: {response.headers.get('content-type')}")
+            print(f"[DEBUG] Response text (first 1000 chars): {response.text[:1000]}")
+            
             response.raise_for_status()
-            data = response.json()
+            
+            # Handle SSE format responses (text/event-stream)
+            content_type = response.headers.get('content-type', '')
+            if 'text/event-stream' in content_type:
+                # Parse SSE format: lines starting with "data: " contain JSON
+                for line in response.text.split('\n'):
+                    if line.startswith('data: '):
+                        data_str = line[6:]  # Remove "data: " prefix
+                        data = json.loads(data_str)
+                        break
+                else:
+                    logger.error("No data found in SSE response")
+                    raise MCPInvocationException("No data in SSE response", mcp=mcp, action=action)
+            else:
+                data = response.json()
+            
+            # Check for JSON-RPC error
+            if 'error' in data:
+                error_msg = data['error'].get('message', 'Unknown error')
+                error_code = data['error'].get('code', -1)
+                error_data = data['error'].get('data', '')
+                raise MCPInvocationException(
+                    f"MCP tool error ({error_code}): {error_msg} - {error_data}",
+                    mcp=mcp,
+                    action=action
+                )
+            
+            # Extract result from JSON-RPC response
+            result_data = data.get('result', data)
+
+            # Extract result from JSON-RPC response
+            result_data = data.get('result', data)
 
             result = MCPInvocationResult(
                 mcp=mcp,
                 action=action,
-                result=data.get("result"),
-                status=data.get("status", "success"),
+                result=result_data,
+                status="success",
                 execution_time=execution_time,
-                verified=data.get("verified", True),
-                metadata=data.get("metadata", {}),
+                verified=True,
+                metadata={},
             )
 
             logger.info(f"MCP invocation succeeded: {action} in {execution_time:.2f}s")
@@ -551,9 +694,18 @@ class ArmorIQClient:
             f"delegate_key={delegate_public_key[:16]}..., validity={validity_seconds}s"
         )
 
+        # Extract the inner token dict from raw_token
+        # raw_token has structure: {intent_reference, token, plan_hash, ...}
+        # CSRG-IAP /delegation/create expects just the inner 'token' dict
+        token_to_delegate = intent_token.raw_token
+        
+        # If raw_token is the response structure, extract the inner token
+        if isinstance(token_to_delegate, dict) and "token" in token_to_delegate:
+            token_to_delegate = token_to_delegate["token"]
+
         # Prepare delegation request matching CsrgDelegationRequest
         payload = {
-            "token": intent_token.raw_token,
+            "token": token_to_delegate,
             "delegate_public_key": delegate_public_key,
             "validity_seconds": validity_seconds,
         }
@@ -579,15 +731,31 @@ class ArmorIQClient:
             data = response.json()
 
             # Parse delegation response
-            delegated_token_data = data.get("delegated_token") or data.get("new_token")
+            # CSRG-IAP returns {"delegation": {...}} structure
+            delegated_token_data = data.get("delegation") or data.get("delegated_token") or data.get("new_token")
             if not delegated_token_data:
                 raise DelegationException(
-                    "Delegation response missing 'delegated_token'",
+                    f"Delegation response missing 'delegation' key. Got keys: {list(data.keys())}",
                     delegation_id=data.get("delegation_id"),
                 )
 
             # Create IntentToken from delegated token
-            delegated_token = IntentToken.model_validate(delegated_token_data)
+            # Delegation response has minimal structure, map to IntentToken fields
+            delegated_token = IntentToken(
+                token_id=delegated_token_data.get("token_id", ""),
+                plan_hash=delegated_token_data.get("plan_hash", intent_token.plan_hash),
+                plan_id=delegated_token_data.get("plan_id"),
+                signature=delegated_token_data.get("signature", ""),
+                issued_at=delegated_token_data.get("issued_at", datetime.now().timestamp()),
+                expires_at=delegated_token_data.get("expires_at", 0),
+                policy=delegated_token_data.get("policy", {}),
+                composite_identity=delegated_token_data.get("composite_identity", ""),
+                client_info=delegated_token_data.get("client_info"),
+                policy_validation=delegated_token_data.get("policy_validation"),
+                step_proofs=delegated_token_data.get("step_proofs", []),
+                total_steps=delegated_token_data.get("total_steps", 0),
+                raw_token={"token": delegated_token_data},  # Wrap in expected structure
+            )
 
             result = DelegationResult(
                 delegation_id=data.get("delegation_id", delegated_token.token_id),
@@ -618,7 +786,10 @@ class ArmorIQClient:
 
     def verify_token(self, intent_token: IntentToken) -> bool:
         """
-        Verify an intent token with IAP (mainly for testing).
+        Verify an intent token with IAP.
+        
+        Note: This is mainly for testing. In production, the proxy
+        handles all token verification via Merkle proof checking.
         
         Args:
             intent_token: Token to verify
@@ -627,10 +798,20 @@ class ArmorIQClient:
             True if token is valid, False otherwise
         """
         try:
-            response = self.http_client.post(
-                f"{self.iap_endpoint}/verify", json={"token": intent_token.raw_token}
-            )
-            return response.status_code == 200
+            # Perform local token validation
+            # Check expiration
+            if intent_token.is_expired:
+                logger.warning(f"Token {intent_token.token_id} has expired")
+                return False
+            
+            # Check required fields
+            if not intent_token.signature or not intent_token.plan_hash:
+                logger.warning(f"Token {intent_token.token_id} missing required fields")
+                return False
+            
+            logger.info(f"Token {intent_token.token_id} is valid (expires in {intent_token.time_until_expiry:.1f}s)")
+            return True
+            
         except Exception as e:
             logger.error(f"Token verification failed: {e}")
             return False

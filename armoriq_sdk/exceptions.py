@@ -82,9 +82,17 @@ class DelegationException(ArmorIQException):
     - Invalid subtask structure
     """
 
-    def __init__(self, message: str, target_agent: str = None):
+    def __init__(
+        self,
+        message: str,
+        target_agent: str = None,
+        delegation_id: str = None,
+        status_code: int = None,
+    ):
         super().__init__(message)
         self.target_agent = target_agent
+        self.delegation_id = delegation_id
+        self.status_code = status_code
 
 
 class ConfigurationException(ArmorIQException):
