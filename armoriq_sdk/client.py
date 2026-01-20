@@ -329,22 +329,23 @@ class ArmorIQClient:
                 logger.debug("Returning cached token")
                 return cached
 
-        # Prepare request payload for CSRG-IAP
+        # Prepare request payload for CSRG-IAP customer endpoint (simplified)
         payload = {
-            "plan": plan_capture.plan,
-            "policy": policy or {"allow": ["*"], "deny": []},  # CSRG-IAP policy format
-            "identity": {
-                "user_id": self.user_id,
-                "agent_id": self.agent_id,
-                "context_id": self.context_id,
+            "user_id": self.user_id,
+            "agent_id": self.agent_id,
+            "context_id": self.context_id,
+            "plan_capture": {
+                "plan": plan_capture.plan,
+                "plan_hash": plan_capture.plan_hash,
+                "merkle_root": plan_capture.merkle_root,
             },
             "metadata": plan_capture.metadata,
             "validity_seconds": validity_seconds,
         }
 
-        # Call CSRG-IAP intent endpoint
+        # Call CSRG-IAP customer endpoint (simplified format)
         try:
-            response = self.http_client.post(f"{self.iap_endpoint}/intent", json=payload)
+            response = self.http_client.post(f"{self.iap_endpoint}/intent/customer", json=payload)
             response.raise_for_status()
             data = response.json()
 
