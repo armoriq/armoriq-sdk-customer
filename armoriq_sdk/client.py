@@ -480,6 +480,11 @@ class ArmorIQClient:
             "Content-Type": "application/json",
         }
         
+        # IMPORTANT: Include API key for customer SDK authentication
+        # The proxy needs this to detect customer SDK mode and skip JWT verification
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        
         # Send CSRG token structure in payload
         if intent_token.raw_token and isinstance(intent_token.raw_token, dict):
             # Include the full CSRG token in payload for proxy to forward to /verify/action
