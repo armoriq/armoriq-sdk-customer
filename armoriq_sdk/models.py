@@ -62,20 +62,18 @@ class PlanCapture(BaseModel):
     """
     Represents a captured plan ready for token issuance.
     
+    The plan structure contains only the steps the agent intends to execute.
+    Hash and Merkle tree generation happens later in get_intent_token() 
+    on the CSRG-IAP service side.
+    
     Attributes:
-        plan: Canonical plan structure
-        plan_hash: CSRG hash of the plan
-        merkle_root: Merkle tree root for the plan
-        ordered_paths: Sorted list of action paths in the plan
+        plan: Plan structure with steps
         llm: LLM identifier used to generate the plan
         prompt: Original prompt used
         metadata: Additional metadata
     """
 
-    plan: Dict[str, Any] = Field(..., description="Canonical plan structure")
-    plan_hash: str = Field(..., description="CSRG canonical hash")
-    merkle_root: str = Field(..., description="Merkle tree root")
-    ordered_paths: List[str] = Field(default_factory=list, description="Action paths")
+    plan: Dict[str, Any] = Field(..., description="Plan structure with steps")
     llm: Optional[str] = Field(None, description="LLM identifier")
     prompt: Optional[str] = Field(None, description="Original prompt")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extra metadata")
