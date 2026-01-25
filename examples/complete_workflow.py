@@ -9,7 +9,7 @@ This example shows the full workflow:
 4. Track usage in dashboard
 
 Prerequisites:
-    1. Get API key from https://dashboard.armoriq.io/api-keys
+    1. Get API key from https://platform.armoriq.ai/dashboard/api-keys
     2. Set environment variables (see below)
     3. Have your MCP server running
 """
@@ -35,7 +35,7 @@ api_key = os.getenv("ARMORIQ_API_KEY")
 if not api_key:
     print("\n❌ Error: ARMORIQ_API_KEY not set!")
     print("\n📝 To get started:")
-    print("   1. Go to https://dashboard.armoriq.io/api-keys")
+    print("   1. Go to https://platform.armoriq.ai/dashboard/api-keys")
     print("   2. Click 'Create API Key'")
     print("   3. Copy your key (ak_live_...)")
     print("   4. Run: export ARMORIQ_API_KEY='your_key_here'")
@@ -183,7 +183,7 @@ print("✅ Example completed successfully!")
 print("=" * 70)
 
 print("\n📊 Next Steps:")
-print("   1. Check usage in dashboard: https://dashboard.armoriq.io/api-keys")
+print("   1. Check usage in dashboard: https://platform.armoriq.ai/dashboard/api-keys")
 print("   2. View API key statistics (usage count, last used)")
 print("   3. Create more API keys for different environments")
 print("   4. Develop your own MCPs with this pattern")
