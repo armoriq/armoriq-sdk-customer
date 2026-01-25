@@ -4,7 +4,7 @@
 
 ### 1. Get Your API Key
 
-1. Go to [https://dashboard.armoriq.io/api-keys](https://dashboard.armoriq.io/api-keys)
+1. Go to [https://platform.armoriq.ai/dashboard/api-keys](https://platform.armoriq.ai/dashboard/api-keys)
 2. Click **"Create API Key"**
 3. Copy your API key (starts with `ak_live_`)
 4. **Save it securely** - you'll only see it once!
@@ -88,7 +88,7 @@ try:
 except ConfigurationException as e:
     # API key missing or invalid format
     print(f"❌ Configuration error: {e}")
-    print("   Get your API key from https://dashboard.armoriq.io/api-keys")
+    print("   Get your API key from https://platform.armoriq.ai/dashboard/api-keys")
     
 except InvalidTokenException as e:
     # Token issuance failed (e.g., invalid API key)
@@ -130,7 +130,7 @@ except MCPInvocationException as e:
 ## Monitoring
 
 Track your API key usage:
-1. Go to [dashboard.armoriq.io/api-keys](https://dashboard.armoriq.io/api-keys)
+1. Go to [platform.armoriq.ai/dashboard/api-keys](https://platform.armoriq.ai/dashboard/api-keys)
 2. View:
    - **Usage Count**: Total API calls
    - **Last Used**: When the key was last used
@@ -214,6 +214,6 @@ client.close()
 
 ## Support
 
-- **Dashboard**: [dashboard.armoriq.io](https://dashboard.armoriq.io)
-- **API Reference**: [docs.armoriq.io/sdk](https://docs.armoriq.io/sdk)
+- **Dashboard**: [platform.armoriq.ai](https://platform.armoriq.ai)
+- **API Reference**: [docs.armoriq.ai/sdk](https://docs.armoriq.ai/sdk)
 - **Issues**: Contact support@armoriq.io

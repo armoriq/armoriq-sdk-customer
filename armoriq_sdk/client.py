@@ -73,10 +73,15 @@ class ArmorIQClient:
         >>> result = client.invoke("travel-mcp", "book_flight", token)
     """
     
-    # Production endpoints (default)
-    DEFAULT_IAP_ENDPOINT = "https://iap.armoriq.io"  # CSRG-IAP (Ed25519 tokens)
-    DEFAULT_PROXY_ENDPOINT = "https://cloud-run-proxy.armoriq.io"
-    DEFAULT_CONMAP_ENDPOINT = "https://api.armoriq.io"  # ConMap IAP (JWT tokens)
+    # Production endpoints (default) - Customer-facing services
+    DEFAULT_IAP_ENDPOINT = "https://customer-iap.armoriq.ai"  # CSRG-IAP (Ed25519 tokens)
+    DEFAULT_PROXY_ENDPOINT = "https://customer-proxy.armoriq.ai"  # Proxy server
+    DEFAULT_CONMAP_ENDPOINT = "https://customer-api.armoriq.ai"  # ConMap Auto (API keys)
+    
+    # Local development endpoints
+    LOCAL_IAP_ENDPOINT = "http://localhost:8080"  # Local CSRG-IAP
+    LOCAL_PROXY_ENDPOINT = "http://localhost:3001"  # Local proxy
+    LOCAL_CONMAP_ENDPOINT = "http://localhost:3000"  # Local ConMap Auto
 
     def __init__(
         self,
@@ -95,9 +100,21 @@ class ArmorIQClient:
         """
         Initialize ArmorIQ client.
         
+        The SDK supports both production and local development modes:
+        
+        **Production Mode (default):**
+        - IAP: https://customer-iap.armoriq.ai
+        - Proxy: https://customer-proxy.armoriq.ai
+        - ConMap: https://customer-api.armoriq.ai
+        
+        **Local Development Mode:**
+        - IAP: http://localhost:8080
+        - Proxy: http://localhost:3001
+        - ConMap: http://localhost:3000
+        
         Args:
-            iap_endpoint: IAP service endpoint URL (defaults to production: https://iap.armoriq.io for CSRG or https://api.armoriq.io for ConMap)
-            proxy_endpoint: Default proxy endpoint URL (defaults to production: https://cloud-run-proxy.armoriq.io)
+            iap_endpoint: IAP service endpoint URL (overrides defaults)
+            proxy_endpoint: Default proxy endpoint URL (overrides defaults)
             proxy_endpoints: Dict mapping MCP names to specific proxy URLs
             user_id: User identifier (or USER_ID env var)
             agent_id: Agent identifier (or AGENT_ID env var)
@@ -105,22 +122,40 @@ class ArmorIQClient:
             timeout: Request timeout in seconds
             max_retries: Maximum retry attempts
             verify_ssl: Whether to verify SSL certificates
-            api_key: Optional API key for authentication
+            api_key: API key for authentication (required)
             use_production: Use production endpoints (default: True). Set False for local development.
-            use_conmap_iap: Use ConMap IAP (JWT tokens, default) vs CSRG-IAP (Ed25519 tokens). Set False for direct CSRG usage.
             
         Raises:
             ConfigurationException: If required configuration is missing
             
         Environment Variables:
+            ARMORIQ_API_KEY: API key for authentication (required)
+            USER_ID: User identifier (required if not passed as arg)
+            AGENT_ID: Agent identifier (required if not passed as arg)
+            CONTEXT_ID: Context identifier (default: "default")
+            ARMORIQ_ENV: Set to "development" to use local endpoints
             IAP_ENDPOINT: Override IAP endpoint
             PROXY_ENDPOINT: Override default proxy endpoint
-            USER_ID: User identifier
-            AGENT_ID: Agent identifier
-            CONTEXT_ID: Context identifier (default: "default")
-            ARMORIQ_API_KEY: API key for authentication
-            ARMORIQ_ENV: Set to "development" to use local endpoints
-            USE_CONMAP_IAP: Set to "false" to use CSRG-IAP directly
+            
+        Examples:
+            >>> # Production (default)
+            >>> client = ArmorIQClient(
+            ...     api_key="ak_live_...",
+            ...     user_id="dev@company.com",
+            ...     agent_id="my-agent"
+            ... )
+            
+            >>> # Local development
+            >>> client = ArmorIQClient(
+            ...     api_key="ak_test_...",
+            ...     user_id="dev@company.com",
+            ...     agent_id="my-agent",
+            ...     use_production=False
+            ... )
+            
+            >>> # Or use environment variable
+            >>> # export ARMORIQ_ENV=development
+            >>> client = ArmorIQClient()
         """
         # Determine if using production based on environment
         env_mode = os.getenv("ARMORIQ_ENV", "production").lower()
@@ -132,11 +167,11 @@ class ArmorIQClient:
         elif os.getenv("IAP_ENDPOINT"):
             self.iap_endpoint = os.getenv("IAP_ENDPOINT")
         elif use_prod:
-            # Use CSRG-IAP (Ed25519 tokens with Merkle proofs)
+            # Production: Use customer-facing CSRG-IAP
             self.iap_endpoint = self.DEFAULT_IAP_ENDPOINT
         else:
-            # Local development default
-            self.iap_endpoint = "http://localhost:8082"
+            # Local development
+            self.iap_endpoint = self.LOCAL_IAP_ENDPOINT
         
         # Load proxy endpoint
         if proxy_endpoint:
@@ -144,10 +179,11 @@ class ArmorIQClient:
         elif os.getenv("PROXY_ENDPOINT"):
             self.default_proxy_endpoint = os.getenv("PROXY_ENDPOINT")
         elif use_prod:
+            # Production: Use customer-facing proxy
             self.default_proxy_endpoint = self.DEFAULT_PROXY_ENDPOINT
         else:
-            # Local development default
-            self.default_proxy_endpoint = "http://localhost:3001"
+            # Local development
+            self.default_proxy_endpoint = self.LOCAL_PROXY_ENDPOINT
         
         # Load user/agent identifiers
         self.user_id = user_id or os.getenv("USER_ID")
@@ -160,14 +196,14 @@ class ArmorIQClient:
             raise ConfigurationException(
                 "API key is required for Customer SDK. "
                 "Set ARMORIQ_API_KEY environment variable or pass api_key parameter. "
-                "Get your API key from https://dashboard.armoriq.io/api-keys"
+                "Get your API key from https://platform.armoriq.ai/dashboard/api-keys"
             )
         
         # Validate API key format (ak_live_ or ak_test_ prefix)
         if not (self.api_key.startswith("ak_live_") or self.api_key.startswith("ak_test_")):
             raise ConfigurationException(
                 f"Invalid API key format. API keys must start with 'ak_live_' or 'ak_test_'. "
-                f"Get your API key from https://dashboard.armoriq.io/api-keys"
+                f"Get your API key from https://platform.armoriq.ai/dashboard/api-keys"
             )
         
         if not self.user_id:
@@ -226,7 +262,7 @@ class ArmorIQClient:
             
             if response.status_code == 401:
                 raise ConfigurationException(
-                    f"Invalid API key. Please check your API key at https://dashboard.armoriq.io/api-keys"
+                    f"Invalid API key. Please check your API key at https://platform.armoriq.ai/dashboard/api-keys"
                 )
             elif response.status_code >= 400:
                 logger.warning(f"API key validation returned status {response.status_code}, but continuing...")
