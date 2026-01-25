@@ -156,6 +156,20 @@ class ArmorIQClient:
         self.api_key = api_key or os.getenv("ARMORIQ_API_KEY")
 
         # Validate required config
+        if not self.api_key:
+            raise ConfigurationException(
+                "API key is required for Customer SDK. "
+                "Set ARMORIQ_API_KEY environment variable or pass api_key parameter. "
+                "Get your API key from https://dashboard.armoriq.io/api-keys"
+            )
+        
+        # Validate API key format (ak_live_ or ak_test_ prefix)
+        if not (self.api_key.startswith("ak_live_") or self.api_key.startswith("ak_test_")):
+            raise ConfigurationException(
+                f"Invalid API key format. API keys must start with 'ak_live_' or 'ak_test_'. "
+                f"Get your API key from https://dashboard.armoriq.io/api-keys"
+            )
+        
         if not self.user_id:
             raise ConfigurationException("user_id is required (set USER_ID env var)")
         if not self.agent_id:
@@ -184,8 +198,49 @@ class ArmorIQClient:
         logger.info(
             f"ArmorIQ SDK initialized: mode={'production' if use_prod else 'development'}, "
             f"user={self.user_id}, agent={self.agent_id}, "
-            f"iap={self.iap_endpoint}, proxy={self.default_proxy_endpoint}"
+            f"iap={self.iap_endpoint}, proxy={self.default_proxy_endpoint}, "
+            f"api_key={'***' + self.api_key[-8:] if self.api_key else 'None'}"
         )
+        
+        # Validate API key with proxy on initialization
+        self._validate_api_key()
+
+    @property
+    def proxy_endpoint(self) -> str:
+        """Get the default proxy endpoint URL."""
+        return self.default_proxy_endpoint
+    
+    def _validate_api_key(self):
+        """
+        Validate API key with the proxy server.
+        This is called during initialization to ensure the API key is valid.
+        """
+        try:
+            # Make a simple health check with the API key
+            headers = {"X-API-Key": self.api_key}
+            response = self.http_client.get(
+                f"{self.proxy_endpoint}/health",
+                headers=headers,
+                timeout=5.0
+            )
+            
+            if response.status_code == 401:
+                raise ConfigurationException(
+                    f"Invalid API key. Please check your API key at https://dashboard.armoriq.io/api-keys"
+                )
+            elif response.status_code >= 400:
+                logger.warning(f"API key validation returned status {response.status_code}, but continuing...")
+            else:
+                logger.info(f"✅ API key validated successfully")
+                
+        except httpx.ConnectError:
+            logger.warning(f"Could not connect to proxy at {self.proxy_endpoint} for API key validation")
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout connecting to proxy at {self.proxy_endpoint} for API key validation")
+        except ConfigurationException:
+            raise
+        except Exception as e:
+            logger.warning(f"API key validation check failed: {e}, but continuing...")
 
     def __enter__(self):
         """Context manager entry."""
@@ -208,13 +263,14 @@ class ArmorIQClient:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> PlanCapture:
         """
-        Capture an execution plan and convert to canonical CSRG format.
+        Capture an execution plan structure.
+        
+        The plan is simply validated and stored. Hash and Merkle tree
+        generation happens later in get_intent_token() on the CSRG-IAP service.
         
         This method takes either:
         1. An LLM identifier and prompt (will call LLM to generate plan), OR
         2. A pre-generated plan dictionary
-        
-        The plan is then canonicalized using CSRG.
         
         Args:
             llm: LLM identifier (e.g., "gpt-4", "claude-3")
@@ -223,11 +279,11 @@ class ArmorIQClient:
             metadata: Optional metadata to attach
             
         Returns:
-            PlanCapture with canonical plan and CSRG hash
+            PlanCapture with plan structure (hash/Merkle created later by CSRG-IAP)
             
         Example:
             >>> plan = client.capture_plan("gpt-4", "Book flight and hotel")
-            >>> print(f"Plan hash: {plan.plan_hash}")
+            >>> print(f"Plan has {len(plan.plan['steps'])} steps")
         """
         logger.info(f"Capturing plan: llm={llm}, prompt={prompt[:50]}...")
 
@@ -245,54 +301,27 @@ class ArmorIQClient:
                 "metadata": metadata or {},
             }
 
-        # Canonicalize with CSRG (support multiple csrg-iap API variants)
-        try:
-            # csrg-iap's CanonicalStructuredReasoningGraph expects construction without
-            # the plan, then build_graph(plan) must be called. Older/newer APIs may
-            # expose attributes instead of methods; handle both by probing.
-            csrg = CanonicalStructuredReasoningGraph()
+        # Validate plan structure
+        if not isinstance(plan, dict):
+            raise ValueError("Plan must be a dictionary")
+        
+        if "steps" not in plan:
+            raise ValueError("Plan must contain 'steps' key")
 
-            # If build_graph exists, use it to build internal graph from plan
-            if hasattr(csrg, "build_graph"):
-                csrg.build_graph(plan)
+        # Return PlanCapture with just the plan structure
+        # Hash and Merkle tree will be created by CSRG-IAP service
+        capture = PlanCapture(
+            plan=plan,
+            llm=llm,
+            prompt=prompt,
+            metadata=metadata or {},
+        )
 
-            # plan_hash: prefer attribute if present, otherwise call canonical_hash()
-            plan_hash = getattr(csrg, "plan_hash", None)
-            if not plan_hash and hasattr(csrg, "canonical_hash"):
-                plan_hash = csrg.canonical_hash()
-
-            # merkle_root: prefer attribute, otherwise canonical_hash() as fallback
-            merkle_root = getattr(csrg, "merkle_root", None)
-            if not merkle_root and hasattr(csrg, "canonical_hash"):
-                merkle_root = csrg.canonical_hash()
-
-            # ordered_paths: may be an attribute or a callable method
-            ordered_paths = getattr(csrg, "ordered_paths", None)
-            if callable(ordered_paths):
-                ordered_paths = ordered_paths()
-            if ordered_paths is None:
-                ordered_paths = []
-
-            capture = PlanCapture(
-                plan=plan,
-                plan_hash=plan_hash,
-                merkle_root=merkle_root,
-                ordered_paths=ordered_paths,
-                llm=llm,
-                prompt=prompt,
-                metadata=metadata or {},
-            )
-
-            logger.info(
-                "Plan captured: hash=%s..., paths=%d",
-                (plan_hash[:16] + "...") if isinstance(plan_hash, str) else str(plan_hash),
-                len(ordered_paths),
-            )
-            return capture
-
-        except Exception as e:
-            logger.error(f"Failed to capture plan: {e}")
-            raise
+        logger.info(
+            "Plan captured with %d steps",
+            len(plan.get("steps", [])),
+        )
+        return capture
 
     def get_intent_token(
         self,
@@ -302,6 +331,12 @@ class ArmorIQClient:
     ) -> IntentToken:
         """
         Request a signed intent token from IAP for the given plan.
+        
+        The CSRG-IAP service will:
+        - Convert plan to Merkle tree structure
+        - Calculate SHA-256 hash from canonical representation
+        - Sign with Ed25519
+        - Return token with hash and merkle_root
         
         Args:
             plan_capture: PlanCapture from capture_plan()
@@ -319,67 +354,68 @@ class ArmorIQClient:
             >>> token = client.get_intent_token(plan)
             >>> print(f"Token expires: {token.expires_at}")
         """
-        logger.info(f"Requesting intent token: plan_hash={plan_capture.plan_hash[:16]}...")
+        logger.info(f"Requesting intent token for plan with {len(plan_capture.plan.get('steps', []))} steps")
 
-        # Check cache first
-        cache_key = f"{plan_capture.plan_hash}:{validity_seconds}"
-        if cache_key in self._token_cache:
-            cached = self._token_cache[cache_key]
-            if not cached.is_expired:
-                logger.debug("Returning cached token")
-                return cached
-
-        # Prepare request payload for CSRG-IAP customer endpoint (simplified)
+        # Prepare request payload - send just the plan structure
+        # CSRG-IAP will create hash and Merkle tree
         payload = {
-            "user_id": self.user_id,
+            "plan": plan_capture.plan,
+            "policy": policy,
             "agent_id": self.agent_id,
             "context_id": self.context_id,
-            "plan_capture": {
-                "plan": plan_capture.plan,
-                "plan_hash": plan_capture.plan_hash,
-                "merkle_root": plan_capture.merkle_root,
-            },
             "metadata": plan_capture.metadata,
-            "validity_seconds": validity_seconds,
+            "expires_in": validity_seconds,
         }
 
-        # Call CSRG-IAP customer endpoint (simplified format)
+        # Call proxy token issuance endpoint
         try:
-            response = self.http_client.post(f"{self.iap_endpoint}/intent/customer", json=payload)
+            headers = {"X-API-Key": self.api_key}
+            response = self.http_client.post(
+                f"{self.proxy_endpoint}/token/issue",
+                json=payload,
+                headers=headers,
+                timeout=30.0
+            )
             response.raise_for_status()
             data = response.json()
 
-            # Parse CSRG-IAP token response
+            if not data.get("success"):
+                raise InvalidTokenException(f"Token issuance failed: {data.get('message', 'Unknown error')}")
+            
+            # Parse token response (now includes hash and merkle_root from CSRG-IAP)
             token_data = data.get("token", {})
             
-            # Add plan to raw_token if not already present (for Merkle proof generation)
-            if "plan" not in data:
-                data["plan"] = plan_capture.plan
+            # Add plan to token for Merkle proof generation during invoke()
+            raw_token = {
+                "plan": plan_capture.plan,
+                "token": token_data,
+                "plan_hash": data.get("plan_hash"),
+                "merkle_root": data.get("merkle_root"),
+                "intent_reference": data.get("intent_reference"),
+                "composite_identity": data.get("composite_identity", ""),
+            }
             
             token = IntentToken(
                 token_id=data.get("intent_reference", "unknown"),
-                plan_hash=data.get("plan_hash", plan_capture.plan_hash),
+                plan_hash=data.get("plan_hash", ""),
                 plan_id=data.get("plan_id"),
-                signature=token_data.get("signature", ""),
-                issued_at=token_data.get("issued_at", datetime.now().timestamp()),
-                expires_at=token_data.get("expires_at", datetime.now().timestamp() + validity_seconds),
+                signature=token_data.get("signature", "") if isinstance(token_data, dict) else "",
+                issued_at=datetime.now().timestamp(),
+                expires_at=datetime.now().timestamp() + validity_seconds,
                 policy=policy or {},
-                composite_identity=token_data.get("composite_identity", data.get("composite_identity", "")),
+                composite_identity=data.get("composite_identity", ""),
                 client_info=data.get("client_info"),
                 policy_validation=data.get("policy_validation"),
                 step_proofs=data.get("step_proofs", []),
-                total_steps=data.get("total_steps", 0),
-                raw_token=data,
+                total_steps=len(plan_capture.plan.get("steps", [])),
+                raw_token=raw_token,
             )
 
-            # Cache token
-            self._token_cache[cache_key] = token
-
-            logger.info(f"Intent token issued: id={token.token_id}, expires={token.time_until_expiry:.1f}s")
+            logger.info(f"Intent token issued: id={token.token_id}, plan_hash={token.plan_hash[:16]}..., expires={token.time_until_expiry:.1f}s")
             return token
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"IAP returned error: {e.response.status_code} - {e.response.text}")
+            logger.error(f"Proxy returned error: {e.response.status_code} - {e.response.text}")
             raise InvalidTokenException(f"Failed to get intent token: {e.response.text}")
         except Exception as e:
             logger.error(f"Failed to get intent token: {e}")
