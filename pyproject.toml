@@ -1,6 +1,6 @@
 [project]
 name = "armoriq-sdk"
-version = "0.1.1"
+version = "0.2.0"
 description = "ArmorIQ SDK for intent-based agent development with CSRG-IAP integration"
 authors = [
     {name = "ArmorIQ Team", email = "support@armoriq.io"}
