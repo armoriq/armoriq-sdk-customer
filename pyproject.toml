@@ -1,17 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "armoriq-sdk"
-version = "0.2.0"
-description = "ArmorIQ SDK for intent-based agent development with CSRG-IAP integration"
-authors = [
-    {name = "ArmorIQ Team", email = "support@armoriq.io"}
-]
-urls = { "Homepage" = "https://armoriq.ai", "Repository" = "https://github.com/armoriq/armoriq-sdk-python" }
+version = "0.2.1"
+description = "ArmorIQ SDK - Build secure AI agents with cryptographic intent verification."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
-keywords = ["armoriq", "intent", "mcp", "agents", "csrg", "iap"]
+authors = [
+    {name = "ArmorIQ Team", email = "license@armoriq.io"}
+]
+keywords = ["armoriq", "sdk", "ai", "agents", "security", "verification"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -19,54 +22,22 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-
 dependencies = [
-    "httpx>=0.27.0",
+    "httpx>=0.24.0",
     "pydantic>=2.0.0",
-    "cryptography>=42.0.0",
+    "cryptography>=41.0.0",
 ]
 
 [project.optional-dependencies]
-csrg = [
-    "csrg-iap>=0.1.0",
-]
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "black", "mypy"]
 
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.1.0",
-    "pytest-mock>=3.12.0",
-    "black>=24.0.0",
-    "ruff>=0.3.0",
-    "mypy>=1.8.0",
-]
+[project.urls]
+Homepage = "https://armoriq.ai"
+Documentation = "https://docs.armoriq.io"
+"Source Code" = "https://github.com/armoriq/armoriq-sdk-python"
 
-examples = [
-    "openai>=1.0.0",
-    "anthropic>=0.18.0",
-    "rich>=13.0.0",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-addopts = "-v --tb=short"
-
-[tool.black]
-line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
-
-[tool.ruff]
-line-length = 100
-target-version = "py39"
-
-[tool.mypy]
-python_version = "3.9"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
+[tool.setuptools.packages.find]
+exclude = ["tests*", "examples*"]
