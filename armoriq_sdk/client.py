@@ -75,18 +75,19 @@ class ArmorIQClient:
     
     # Production endpoints (default) - Customer-facing services
     DEFAULT_IAP_ENDPOINT = "https://customer-iap.armoriq.ai"  # CSRG-IAP (Ed25519 tokens)
-    DEFAULT_PROXY_ENDPOINT = "https://customer-proxy.armoriq.ai"  # Proxy server
-    DEFAULT_CONMAP_ENDPOINT = "https://customer-api.armoriq.ai"  # ConMap Auto (API keys)
+    DEFAULT_PROXY_ENDPOINT = "https://customer-proxy.armoriq.ai"  # Proxy server (validation only)
+    DEFAULT_BACKEND_ENDPOINT = "https://customer-api.armoriq.ai"  # Backend (IAP token issuance)
     
     # Local development endpoints
     LOCAL_IAP_ENDPOINT = "http://localhost:8080"  # Local CSRG-IAP
     LOCAL_PROXY_ENDPOINT = "http://localhost:3001"  # Local proxy
-    LOCAL_CONMAP_ENDPOINT = "http://localhost:3000"  # Local ConMap Auto
+    LOCAL_BACKEND_ENDPOINT = "http://localhost:3000"  # Local Backend (conmap-auto)
 
     def __init__(
         self,
         iap_endpoint: Optional[str] = None,
         proxy_endpoint: Optional[str] = None,
+        backend_endpoint: Optional[str] = None,
         proxy_endpoints: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -173,7 +174,7 @@ class ArmorIQClient:
             # Local development
             self.iap_endpoint = self.LOCAL_IAP_ENDPOINT
         
-        # Load proxy endpoint
+        # Load proxy endpoint (for action validation only)
         if proxy_endpoint:
             self.default_proxy_endpoint = proxy_endpoint
         elif os.getenv("PROXY_ENDPOINT"):
@@ -184,6 +185,18 @@ class ArmorIQClient:
         else:
             # Local development
             self.default_proxy_endpoint = self.LOCAL_PROXY_ENDPOINT
+        
+        # Load backend endpoint (for token issuance - IAP calls go through backend)
+        if backend_endpoint:
+            self.backend_endpoint = backend_endpoint
+        elif os.getenv("BACKEND_ENDPOINT"):
+            self.backend_endpoint = os.getenv("BACKEND_ENDPOINT")
+        elif use_prod:
+            # Production: Use customer-facing backend
+            self.backend_endpoint = self.DEFAULT_BACKEND_ENDPOINT
+        else:
+            # Local development
+            self.backend_endpoint = self.LOCAL_BACKEND_ENDPOINT
         
         # Load user/agent identifiers
         self.user_id = user_id or os.getenv("USER_ID")
@@ -235,6 +248,7 @@ class ArmorIQClient:
             f"ArmorIQ SDK initialized: mode={'production' if use_prod else 'development'}, "
             f"user={self.user_id}, agent={self.agent_id}, "
             f"iap={self.iap_endpoint}, proxy={self.default_proxy_endpoint}, "
+            f"backend={self.backend_endpoint}, "
             f"api_key={'***' + self.api_key[-8:] if self.api_key else 'None'}"
         )
         
@@ -392,22 +406,23 @@ class ArmorIQClient:
         """
         logger.info(f"Requesting intent token for plan with {len(plan_capture.plan.get('steps', []))} steps")
 
-        # Prepare request payload - send just the plan structure
-        # CSRG-IAP will create hash and Merkle tree
+        # Prepare request payload for Backend /iap/sdk/token endpoint
+        # The Backend will call CSRG-IAP to create hash and Merkle tree
+        # NOTE: IAP calls go through Backend, NOT through Proxy
         payload = {
-            "plan": plan_capture.plan,
-            "policy": policy,
+            "user_id": self.user_id,
             "agent_id": self.agent_id,
             "context_id": self.context_id,
-            "metadata": plan_capture.metadata,
+            "plan": plan_capture.plan,
+            "policy": policy,
             "expires_in": validity_seconds,
         }
 
-        # Call proxy token issuance endpoint
+        # Call Backend token issuance endpoint (SDK → Backend → CSRG-IAP)
         try:
             headers = {"X-API-Key": self.api_key}
             response = self.http_client.post(
-                f"{self.proxy_endpoint}/token/issue",
+                f"{self.backend_endpoint}/iap/sdk/token",
                 json=payload,
                 headers=headers,
                 timeout=30.0
@@ -451,7 +466,7 @@ class ArmorIQClient:
             return token
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"Proxy returned error: {e.response.status_code} - {e.response.text}")
+            logger.error(f"Backend returned error: {e.response.status_code} - {e.response.text}")
             raise InvalidTokenException(f"Failed to get intent token: {e.response.text}")
         except Exception as e:
             logger.error(f"Failed to get intent token: {e}")
