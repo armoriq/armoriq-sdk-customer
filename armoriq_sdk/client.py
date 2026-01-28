@@ -337,19 +337,29 @@ class ArmorIQClient:
         """
         logger.info(f"Capturing plan: llm={llm}, prompt={prompt[:50]}...")
 
-        # If plan not provided, generate from LLM (simplified for now)
+        # Plan must be provided by the user
+        # Users should define their plan based on their onboarded MCPs and tools
         if plan is None:
-            # In production, this would call the LLM
-            # For now, create a simple structured plan
-            # NOTE: For CSRG Merkle verification, the plan must contain the exact
-            # action structure that will be sent during invoke()
-            plan = {
-                "goal": prompt,
-                "steps": [
-                    {"action": "get_weather", "params": {"city": "San Francisco"}},  # Must match invoke params
-                ],
-                "metadata": metadata or {},
-            }
+            raise ValueError(
+                "Plan structure is required. "
+                "You must provide an explicit plan with the MCP and actions you want to execute.\n\n"
+                "Example:\n"
+                "  plan = client.capture_plan(\n"
+                "      llm='gpt-4',\n"
+                "      prompt='Your task description',\n"
+                "      plan={\n"
+                "          'goal': 'Your task description',\n"
+                "          'steps': [\n"
+                "              {\n"
+                "                  'action': 'your_tool_name',\n"
+                "                  'mcp': 'your-mcp-name',\n"
+                "                  'params': {'param1': 'value1'}\n"
+                "              }\n"
+                "          ]\n"
+                "      }\n"
+                "  )\n\n"
+                "Note: Use the MCP name and tool names from your onboarded MCPs on the ArmorIQ platform."
+            )
 
         # Validate plan structure
         if not isinstance(plan, dict):
@@ -598,12 +608,18 @@ class ArmorIQClient:
                     
                     # Determine CSRG path from action
                     # CRITICAL: Must use a LEAF path, not a container
-                    # Path format: /steps/[0]/action for action name leaf
-                    step_index = 0  # TODO: track actual step index dynamically
-                    csrg_path = f"/steps/[{step_index}]/action"
+                    # Find the action in the plan steps
+                    action_step_index = 0
+                    for idx, step in enumerate(plan.get("steps", [])):
+                        if isinstance(step, dict) and step.get("action") == action:
+                            action_step_index = idx
+                            break
+                    
+                    # Path format: /steps/[index]/action for action name leaf
+                    csrg_path = f"/steps/[{action_step_index}]/action"
                     
                     # Get the actual leaf value from the plan for Merkle verification
-                    step_obj = plan.get("steps", [])[step_index] if step_index < len(plan.get("steps", [])) else {}
+                    step_obj = plan.get("steps", [])[action_step_index] if action_step_index < len(plan.get("steps", [])) else {}
                     leaf_value = step_obj.get("action", action) if isinstance(step_obj, dict) else action
                     
                     # Generate Merkle proof for this path
@@ -621,26 +637,40 @@ class ArmorIQClient:
             headers["X-CSRG-Proof"] = json.dumps(merkle_proof)
             logger.debug(f"Added CSRG proof header with {len(merkle_proof)} items")
         
-        # Determine CSRG path from action (simplified - should match plan structure)
-        # CRITICAL: Must verify against a LEAF node, not a container node
-        # The action name is stored at /steps/[0]/action (a leaf), not /steps/[0] (a container)
-        step_index = 0  # TODO: track actual step index
+        # Find the step index for this action in the plan
+        # CRITICAL: Must verify against the correct LEAF node for the action being invoked
+        plan = intent_token.raw_token.get("plan", {}) if intent_token.raw_token else {}
+        steps = plan.get("steps", [])
+        
+        # Find which step contains this action
+        step_index = None
+        for idx, step in enumerate(steps):
+            if isinstance(step, dict) and step.get("action") == action:
+                step_index = idx
+                break
+        
+        if step_index is None:
+            raise IntentMismatchException(
+                f"Action '{action}' not found in the original plan. "
+                f"Plan contains actions: {[s.get('action') if isinstance(s, dict) else 'unknown' for s in steps]}. "
+                f"You can only invoke actions that were included in the plan when you called capture_plan()."
+            )
+        
+        # CSRG path points to the action leaf node
         csrg_path = f"/steps/[{step_index}]/action"
         headers["X-CSRG-Path"] = csrg_path
         
         # Value digest for CSRG verification - MUST match the actual value in the plan
         # Get the LEAF value from the plan that was used to generate the token
-        # For path /steps/[0]/action, the value is just the action name string
         import hashlib
         import json
         
-        plan = intent_token.raw_token.get("plan", {}) if intent_token.raw_token else {}
         logger.debug(f"[MERKLE DEBUG] raw_token keys: {list(intent_token.raw_token.keys()) if intent_token.raw_token else 'None'}")
         logger.debug(f"[MERKLE DEBUG] plan from token: {plan}")
         
         # Extract the leaf value at the path we're verifying
-        # For /steps/[0]/action, the value is plan["steps"][0]["action"]
-        step_obj = plan.get("steps", [])[step_index] if step_index < len(plan.get("steps", [])) else {}
+        # For /steps/[step_index]/action, the value is plan["steps"][step_index]["action"]
+        step_obj = steps[step_index] if step_index < len(steps) else {}
         leaf_value = step_obj.get("action", action) if isinstance(step_obj, dict) else action
         
         # CRITICAL: Use the same JSON canonicalization as CSRG-IAP
@@ -649,11 +679,11 @@ class ArmorIQClient:
         value_digest = hashlib.sha256(value_str.encode("utf-8")).hexdigest()
         headers["X-CSRG-Value-Digest"] = value_digest
         
-        logger.info(f"[MERKLE DEBUG] CSRG Verification Details:")
-        logger.info(f"  Path: {csrg_path}")
-        logger.info(f"  Leaf Value: {leaf_value}")
-        logger.info(f"  Value String (canonical): {value_str}")
-        logger.info(f"  Digest: {value_digest}")
+        logger.debug(f"CSRG Verification Details:")
+        logger.debug(f"  Path: {csrg_path}")
+        logger.debug(f"  Leaf Value: {leaf_value}")
+        logger.debug(f"  Value String (canonical): {value_str}")
+        logger.debug(f"  Digest: {value_digest}")
         
         # Call proxy
         try:
@@ -661,10 +691,10 @@ class ArmorIQClient:
             response = self.http_client.post(f"{proxy_url}/invoke", json=payload, headers=headers)
             execution_time = (datetime.now() - start_time).total_seconds()
 
-            # Debug: print raw response BEFORE raise_for_status
-            print(f"[DEBUG] Response status: {response.status_code}")
-            print(f"[DEBUG] Response Content-Type: {response.headers.get('content-type')}")
-            print(f"[DEBUG] Response text (first 1000 chars): {response.text[:1000]}")
+            # Debug logging
+            logger.debug(f"Response status: {response.status_code}")
+            logger.debug(f"Response Content-Type: {response.headers.get('content-type')}")
+            logger.debug(f"Response text (first 500 chars): {response.text[:500]}")
             
             response.raise_for_status()
             
