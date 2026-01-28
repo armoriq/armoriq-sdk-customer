@@ -1,4 +1,4 @@
-# 🚀 ArmorIQ SDK
+# ArmorIQ SDK
 
 **Build secure AI agents with cryptographic intent verification.**
 
@@ -6,16 +6,16 @@ The ArmorIQ SDK enables developers to build AI agents with built-in security and
 
 ---
 
-## 🎯 Why ArmorIQ?
+## Why ArmorIQ?
 
-- ✅ **Simple** - Just one API key, no cloud credentials
-- ✅ **Secure** - Cryptographic verification for every action  
-- ✅ **Auditable** - Complete execution trail
-- ✅ **Fast** - Get started in 5 minutes
+- **Simple** - Just one API key, no cloud credentials
+- **Secure** - Cryptographic verification for every action
+- **Auditable** - Complete execution trail
+- **Fast** - Get started in 5 minutes
 
 ---
 
-## 📦 Installation
+## Installation
 
 ```bash
 pip install armoriq-sdk
@@ -23,7 +23,7 @@ pip install armoriq-sdk
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ### 1. Get Your API Key
 
@@ -83,31 +83,20 @@ print(result)
 
 ---
 
-## 📚 Documentation
+## Documentation
 
-For complete documentation, visit **[docs.armoriq.ai](https://docs.armoriq.ai)**
-
-- [Getting Started Guide](https://docs.armoriq.ai/getting-started)
-- [API Reference](https://docs.armoriq.ai/api-reference)
-- [Security Overview](https://docs.armoriq.ai/security)
-- [Examples](https://docs.armoriq.ai/examples)
+For complete documentation, visit [docs.armoriq.ai](https://docs.armoriq.ai)
 
 ---
 
-## 🔗 Links
+## Links
 
-- **Website**: [armoriq.ai](https://armoriq.ai)
-- **Documentation**: [docs.armoriq.ai](https://docs.armoriq.ai)
-- **Dashboard**: [dashboard.armoriq.io](https://dashboard.armoriq.io)
-- **GitHub**: [github.com/armoriq/armoriq-sdk-customer](https://github.com/armoriq/armoriq-sdk-customer)
-- **Support**: [support@armoriq.io](mailto:support@armoriq.io)
+- [armoriq.ai](https://armoriq.ai)
+- [docs.armoriq.ai](https://docs.armoriq.ai)
+- [dashboard.armoriq.io](https://dashboard.armoriq.io)
 
 ---
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-**Built with ❤️ by the ArmorIQ Team**
