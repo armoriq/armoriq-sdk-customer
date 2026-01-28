@@ -9,7 +9,7 @@ long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists
 
 setup(
     name="armoriq-sdk",
-    version="0.2.1",
+    version="0.2.2",
     author="ArmorIQ Team",
     author_email="license@armoriq.io",
     description="ArmorIQ SDK - Build secure AI agents with cryptographic intent verification.",
