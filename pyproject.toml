@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "armoriq-sdk"
-version = "0.2.3"
+version = "0.2.4"
 description = "ArmorIQ SDK - Build secure AI agents with cryptographic intent verification."
 readme = "README.md"
 requires-python = ">=3.9"
