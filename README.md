@@ -1,30 +1,19 @@
-# 🚀 ArmorIQ SDK - Customer Edition# 🚀 ArmorIQ SDK - Customer Edition# ArmorIQ SDK (Python)
-
-
+# 🚀 ArmorIQ SDK (Python)
 
 **Simple, powerful SDK for building AI-powered tools with security built-in.**
 
+Build MCP (Model Context Protocol) tools that your AI agents can safely call, with **ZERO security complexity**. The ArmorIQ SDK provides a simple, powerful interface for building AI agents that use the Canonical Structured Reasoning Graph (CSRG) Intent Assurance Plane (IAP) for secure, auditable action execution.
 
+---
 
-Build MCP (Model Context Protocol) tools that your AI agents can safely call, with **ZERO security complexity**.**Simple, powerful SDK for building AI-powered tools with security built-in.****Intent-based Agent Development with CSRG-IAP Integration**
+## ✨ Why Choose ArmorIQ SDK?
 
-
-
-## ✨ Why Choose ArmorIQ Customer SDK?
-
-
-
-### 🎯 **No GCP Credentials Required!**Build MCP (Model Context Protocol) tools that your AI agents can safely call, with zero security complexity.The ArmorIQ SDK provides a simple, powerful interface for building AI agents that use the Canonical Structured Reasoning Graph (CSRG) Intent Assurance Plane (IAP) for secure, auditable action execution.
+### 🎯 **No GCP Credentials Required!**
 
 - ❌ No service account JSON files
-
 - ❌ No KMS configuration
-
 - ❌ No IAM role setup
-
-- ✅ **Just one API key - that's it!**---## Architecture
-
-
+- ✅ **Just one API key - that's it!**
 
 ### 🚀 **Perfect For:**
 
