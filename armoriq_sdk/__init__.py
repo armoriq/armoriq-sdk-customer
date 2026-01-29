@@ -18,7 +18,7 @@ from .exceptions import (
 )
 from .models import IntentToken, PlanCapture, MCPInvocation, DelegationResult
 
-__version__ = "0.2.1"
+__version__ = "0.2.5"
 __author__ = "ArmorIQ Team"
 __email__ = "license@armoriq.io"
 
