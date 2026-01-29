@@ -575,6 +575,8 @@ class ArmorIQClient:
         headers = {
             "Accept": "application/json, text/event-stream",  # MCP servers require both
             "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",  # Prevent caching issues
+            "X-Request-ID": f"sdk-{datetime.now().timestamp()}",  # Unique request ID
         }
         
         # IMPORTANT: Include API key for customer SDK authentication
@@ -588,10 +590,14 @@ class ArmorIQClient:
             payload["token"] = intent_token.raw_token.get("token", {})
             payload["csrg_token"] = intent_token.raw_token.get("token", {})
             
-            # Also set Authorization header (Proxy checks for this first)
-            # Send the composite_identity or a placeholder since Proxy expects Bearer token
-            auth_value = intent_token.raw_token.get("composite_identity") or intent_token.token_id
-            headers["Authorization"] = f"Bearer {auth_value}"
+            # IMPORTANT: For customer SDK with API key, do NOT send Authorization Bearer header
+            # The proxy uses API key auth (auth_method='api_key') to detect customer SDK mode
+            # Adding a Bearer token would make it look like enterprise SDK and cause 404
+            # Only set Authorization header for enterprise SDK (when not using API key)
+            if not self.api_key:
+                # Enterprise SDK: Send the composite_identity as Bearer token
+                auth_value = intent_token.raw_token.get("composite_identity") or intent_token.token_id
+                headers["Authorization"] = f"Bearer {auth_value}"
         
         # Find the step index for this action in the plan
         # CRITICAL: Must verify against the correct LEAF node for the action being invoked
@@ -664,30 +670,62 @@ class ArmorIQClient:
         # Call proxy
         try:
             start_time = datetime.now()
-            response = self.http_client.post(f"{proxy_url}/invoke", json=payload, headers=headers)
-            execution_time = (datetime.now() - start_time).total_seconds()
-
-            # Debug logging
-            logger.debug(f"Response status: {response.status_code}")
-            logger.debug(f"Response Content-Type: {response.headers.get('content-type')}")
-            logger.debug(f"Response text (first 500 chars): {response.text[:500]}")
             
-            response.raise_for_status()
+            # Verbose logging with print for debugging
+            print(f"\n� DEBUG: Making POST request to: {proxy_url}/invoke")
+            print(f"� DEBUG: Headers: {json.dumps({k: v[:50] + '...' if len(str(v)) > 50 else v for k, v in headers.items()}, indent=2)}")
+            print(f"� DEBUG: Payload mcp={payload.get('mcp')}, action={payload.get('action')}")
             
-            # Handle SSE format responses (text/event-stream)
-            content_type = response.headers.get('content-type', '')
-            if 'text/event-stream' in content_type:
-                # Parse SSE format: lines starting with "data: " contain JSON
-                for line in response.text.split('\n'):
-                    if line.startswith('data: '):
-                        data_str = line[6:]  # Remove "data: " prefix
-                        data = json.loads(data_str)
-                        break
+            # For SSE responses, we need to read the entire stream before checking status
+            # because the status might only be available after the stream completes
+            with self.http_client.stream('POST', f"{proxy_url}/invoke", json=payload, headers=headers) as response:
+                # Debug logging
+                print(f"� DEBUG: Response status: {response.status_code}")
+                print(f"� DEBUG: Response Content-Type: {response.headers.get('content-type')}")
+                
+                # Read the entire response
+                content = b""
+                chunk_count = 0
+                for chunk in response.iter_bytes():
+                    content += chunk
+                    chunk_count += 1
+                
+                execution_time = (datetime.now() - start_time).total_seconds()
+                response_text = content.decode('utf-8')
+                print(f"🔍 DEBUG: Read {chunk_count} chunks, total {len(content)} bytes")
+                print(f"🔍 DEBUG: Response lines:")
+                for i, line in enumerate(response_text.split('\n')[:10]):
+                    print(f"🔍 DEBUG:   Line {i}: {repr(line)}")
+                
+                # Now check status after reading
+                response.raise_for_status()
+                
+                # Handle SSE format responses (text/event-stream)
+                content_type = response.headers.get('content-type', '')
+                if 'text/event-stream' in content_type:
+                    # Parse SSE format: lines starting with "data: " contain JSON
+                    logger.debug(f"Handling SSE response")
+                    data = None
+                    for line in response_text.split('\n'):
+                        if line.startswith('data: '):
+                            data_str = line[6:]  # Remove "data: " prefix
+                            try:
+                                data = json.loads(data_str)
+                                logger.debug(f"Parsed SSE data: {data}")
+                                break
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"Failed to parse SSE line: {data_str}, error: {e}")
+                                continue
+                    
+                    if data is None:
+                        logger.error("No valid JSON data found in SSE response")
+                        raise MCPInvocationException("No data in SSE response", mcp=mcp, action=action)
                 else:
-                    logger.error("No data found in SSE response")
-                    raise MCPInvocationException("No data in SSE response", mcp=mcp, action=action)
-            else:
-                data = response.json()
+                    try:
+                        data = json.loads(response_text)
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to parse JSON response: {response_text[:500]}")
+                        raise MCPInvocationException(f"Invalid JSON response", mcp=mcp, action=action)
             
             # Check for JSON-RPC error
             if 'error' in data:
@@ -721,7 +759,17 @@ class ArmorIQClient:
 
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
-            error_detail = e.response.text
+            
+            # Safely read error detail from response
+            try:
+                # Check if response is already read
+                if hasattr(e.response, '_content'):
+                    error_detail = e.response.text
+                else:
+                    # For streaming responses, read the content first
+                    error_detail = e.response.read().decode('utf-8')
+            except Exception:
+                error_detail = f"Status {status_code}"
 
             # Parse specific error types
             if status_code == 401 or status_code == 403:
