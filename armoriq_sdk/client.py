@@ -9,19 +9,6 @@ from datetime import datetime
 
 import httpx
 
-# Optional CSRG-IAP imports
-try:
-    from csrg_iap.core.csrg import CanonicalStructuredReasoningGraph
-    from csrg_iap.core.intent import IntentCommit
-    from csrg_iap.core.crypto import Ed25519PrivateKey
-    CSRG_AVAILABLE = True
-except ImportError:
-    CSRG_AVAILABLE = False
-    # Create placeholder types for type hints
-    CanonicalStructuredReasoningGraph = None
-    IntentCommit = None
-    Ed25519PrivateKey = None
-
 from .models import (
     IntentToken,
     PlanCapture,

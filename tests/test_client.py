@@ -121,44 +121,6 @@ class TestClientInitialization:
         client.http_client.close.assert_called_once()
 
 
-class TestCapturePlan:
-    """Test plan capture functionality."""
-
-    @patch("armoriq_sdk.client.CanonicalStructuredReasoningGraph")
-    def test_capture_plan_basic(self, mock_csrg, client):
-        """Test basic plan capture."""
-        # Mock CSRG
-        mock_csrg_instance = Mock()
-        mock_csrg_instance.plan_hash = "test_hash_123"
-        mock_csrg_instance.merkle_root = "test_merkle"
-        mock_csrg_instance.ordered_paths = ["/step1", "/step2"]
-        mock_csrg.return_value = mock_csrg_instance
-
-        plan = client.capture_plan(llm="gpt-4", prompt="test prompt")
-
-        assert isinstance(plan, PlanCapture)
-        assert plan.plan_hash == "test_hash_123"
-        assert plan.merkle_root == "test_merkle"
-        assert plan.llm == "gpt-4"
-        assert plan.prompt == "test prompt"
-        assert len(plan.ordered_paths) == 2
-
-    @patch("armoriq_sdk.client.CanonicalStructuredReasoningGraph")
-    def test_capture_plan_with_provided_plan(self, mock_csrg, client):
-        """Test plan capture with pre-generated plan."""
-        mock_csrg_instance = Mock()
-        mock_csrg_instance.plan_hash = "custom_hash"
-        mock_csrg_instance.merkle_root = "custom_merkle"
-        mock_csrg_instance.ordered_paths = []
-        mock_csrg.return_value = mock_csrg_instance
-
-        custom_plan = {"custom": "plan", "steps": []}
-        plan = client.capture_plan(llm="gpt-4", prompt="test", plan=custom_plan)
-
-        assert plan.plan["custom"] == "plan"
-        mock_csrg.assert_called_once()
-
-
 class TestGetIntentToken:
     """Test intent token acquisition."""
 
