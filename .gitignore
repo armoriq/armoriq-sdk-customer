@@ -87,11 +87,18 @@ site/
 _build/
 
 # Internal documentation (development/progress tracking)
-# These are kept for internal development but not published
-docs/internal/
-VERIFICATION_REPORT.md
-ENDPOINT_CONFIG_SUMMARY.md
-BANNER.md
+# All docs are maintained in sdk-final-docs repo
+# Only development-guide folder is kept in SDK repo
+docs/*
+!docs/development-guide/
+!docs/development-guide/**
+
+# Ignore all markdown files except essentials and development-guide
+*.md
+!README.md
+!CHANGELOG.md
+!LICENSE
+!docs/development-guide/*.md
 
 # Test files (organized in tests/ directory)
 # Integration tests
