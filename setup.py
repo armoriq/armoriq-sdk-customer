@@ -17,7 +17,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://armoriq.ai",
     project_urls={
-        "Documentation": "https://docs.armoriq.io",
+        "Documentation": "https://docs.armoriq.ai",
         "Source Code": "https://github.com/armoriq/armoriq-sdk-python",
     },
     packages=find_packages(exclude=["tests*", "examples*"]),

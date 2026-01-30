@@ -93,7 +93,7 @@ For complete documentation, visit [docs.armoriq.ai](https://docs.armoriq.ai)
 
 - [armoriq.ai](https://armoriq.ai)
 - [docs.armoriq.ai](https://docs.armoriq.ai)
-- [platform.armoriq.io](https://platform.armoriq.ai)
+- [platform.armoriq.ai](https://platform.armoriq.ai)
 
 ---
 

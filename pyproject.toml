@@ -36,7 +36,7 @@ dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "black", "mypy"]
 
 [project.urls]
 Homepage = "https://armoriq.ai"
-Documentation = "https://docs.armoriq.io"
+Documentation = "https://docs.armoriq.ai"
 "Source Code" = "https://github.com/armoriq/armoriq-sdk-python"
 
 [tool.setuptools.packages.find]

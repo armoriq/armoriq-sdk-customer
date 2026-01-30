@@ -49,9 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial beta release of ArmorIQ SDK
 - Core `ArmorIQClient` class with CSRG-IAP integration
 - Production endpoints configured by default:
-  - IAP: `https://iap.armoriq.io`
-  - Proxy: `https://cloud-run-proxy.armoriq.io`
-  - ConMap: `https://api.armoriq.io`
+  - IAP: `https://customer-iap.armoriq.ai`
+  - Proxy: `https://cloud-run-customer-proxy.armoriq.ai`
+  - ConMap: `https://customer-api.armoriq.ai`
 - Automatic environment detection (`ARMORIQ_ENV`)
 - Flexible endpoint configuration (env vars, parameters, per-MCP)
 - Core APIs:

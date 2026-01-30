@@ -17,7 +17,7 @@ ArmorIQ SDK enables you to build **intelligent agents** that securely execute ac
 
 * Python 3.8 or higher  
 * pip package manager  
-* ArmorIQ API key (get one at [app.armoriq.io](https://app.armoriq.io/))
+* ArmorIQ API key (get one at [platform.armoriq.ai](https://platform.armoriq.ai/))
 
 #### **Install**
 
@@ -42,7 +42,7 @@ from armoriq_sdk import ArmorIQClient
 
 # Initialize with your credentials
 client = ArmorIQClient(
-    api_key="ak_live_your_api_key_here",  # Get from app.armoriq.io
+    api_key="ak_live_your_api_key_here",  # Get from platform.armoriq.ai
     user_id="user_001",                    # Your application user ID
     agent_id="data_analyzer_v1"            # Your agent identifier
 )
@@ -121,7 +121,7 @@ print(f"✓ Token issued: {token[:20]}...")
 
 **Policy Options:**
 
-Policies control what actions can be executed. You can define them programmatically or using the **visual policy builder** at [app.armoriq.io](https://app.armoriq.io/):
+Policies control what actions can be executed. You can define them programmatically or using the **visual policy builder** at [platform.armoriq.ai](https://platform.armoriq.ai/):
 
 ```py
 # Allow specific actions only
@@ -150,7 +150,7 @@ token_response = client.get_intent_token(
 
 Instead of writing policies manually, use the **ArmorIQ Canvas** \- a visual drag-and-drop interface:
 
-1. Go to [app.armoriq.io/dashboard/policies](https://app.armoriq.io/dashboard/policies)  
+1. Go to [platform.armoriq.ai/dashboard/policies](https://platform.armoriq.ai/dashboard/policies)  
 2. Click "Canvas" to open the visual builder  
 3. Drag and drop: Users → MCPs → Agents  
 4. Define permissions visually (read, create, update, delete)  
@@ -544,7 +544,7 @@ Set up your environment:
 ```py
 # .env file
 ARMORIQ_API_KEY=ak_live_your_api_key_here
-ARMORIQ_PROXY_URL=https://proxy.armoriq.io
+ARMORIQ_PROXY_URL=https://customer-proxy.armoriq.ai
 ```
 
 Use in code:

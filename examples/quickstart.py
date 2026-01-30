@@ -14,7 +14,7 @@ Requirements:
 - Weather MCP running on port 8083 (or use remote MCP)
 - ArmorIQ IAP running (production or local)
 - ArmorIQ Proxy running (production or local)
-- Your API key from dashboard.armoriq.io
+- Your API key from platform.armoriq.ai
 """
 
 from armoriq import Client, Action
@@ -26,7 +26,7 @@ def main():
     
     # Step 1: Initialize client (JUST AN API KEY!)
     print("Step 1: Initializing client...")
-    print("  💡 Tip: Get your API key from dashboard.armoriq.io")
+    print("  💡 Tip: Get your API key from platform.armoriq.ai")
     
     client = Client(
         api_key="demo-api-key",  # Replace with your actual API key
@@ -85,6 +85,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Error: {e}")
         print("\n💡 Troubleshooting:")
-        print("   1. Check your API key at dashboard.armoriq.io")
+        print("   1. Check your API key at platform.armoriq.ai")
         print("   2. Ensure Weather MCP is running (python app.py)")
         print("   3. Verify endpoints are accessible")

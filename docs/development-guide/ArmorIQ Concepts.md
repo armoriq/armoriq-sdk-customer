@@ -535,7 +535,7 @@ token = token_response["token"]
 
 The **ArmorIQ Canvas** is a visual drag-and-drop interface for creating policies without writing code:
 
-**Access:** [https://armoriq.io/dashboard/policies](https://armoriq.io/dashboard/policies)
+**Access:** [https://platform.armoriq.ai/dashboard/policies](https://platform.armoriq.ai/dashboard/policies)
 
 **Features:**
 
@@ -605,7 +605,7 @@ token_response = client.get_intent_token(
 
 ArmorIQ provides a full REST API for policy management:
 
-**Base URL:** [https://api.armoriq.io/dashborad/policies](https://api.armoriq.io/dashborad/policies)
+**Base URL:** [https://customer-api.armoriq.ai/dashborad/policies](https://customer-api.armoriq.ai/dashborad/policies)
 
 **Authentication:** User JWT token (from OAuth2 login)
 
@@ -640,7 +640,7 @@ POST /policies/:policyId/deactivate
 import requests
 
 response = requests.post(
-    "https://api.armoriq.io/policies",
+    "https://customer-api.armoriq.ai/policies",
     headers={"Authorization": f"Bearer {user_jwt}"},
     json={
         "name": "Data Analyst Policy",
@@ -1263,7 +1263,7 @@ When an agent invokes an action, the SDK sends **CSRG headers**:
 
 ```
 POST /invoke HTTP/1.1
-Host: proxy.armoriq.io
+Host: customer-proxy.armoriq.ai
 X-API-Key: ak_live_...
 Authorization: Bearer <token>
 X-CSRG-Path: /steps/[0]/action
@@ -1463,7 +1463,7 @@ result = client.invoke(
 
 ```
 Step 1: API Key Creation
-   └─> User creates API key at armoriq.io
+   └─> User creates API key at platform.armoriq.ai
    └─> Format: ak_live_<64 hex chars>
    └─> Stored hashed (bcrypt) in database
    └─> Associated with user_id, permissions

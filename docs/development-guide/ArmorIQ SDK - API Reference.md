@@ -67,7 +67,7 @@ client = ArmorIQClient(
 | api\_key | str | Yes | ARMORIQ\_API\_KEY env var | Your API key (format: ak\_live\_\<64 hex\>) |
 | user\_id | str | Yes | ARMORIQ\_USER\_ID env var | User identifier for tracking |
 | agent\_id | str | Yes | ARMORIQ\_AGENT\_ID env var | Unique agent identifier |
-| proxy\_url | str | No | https://proxy.armoriq.io | ArmorIQ Proxy base URL |
+| proxy\_url | str | No | https://customer-proxy.armoriq.ai | ArmorIQ Proxy base URL |
 | timeout | int | No | 30 | Request timeout in seconds |
 | max\_retries | int | No | 3 | Max retry attempts for failed requests |
 | verify\_ssl | bool | No | True | Verify SSL certificates |
@@ -95,7 +95,7 @@ client = ArmorIQClient(
     api_key="ak_live_" + "a" * 64,
     user_id="user_12345",
     agent_id="analytics_bot_v1",
-    proxy_url="https://proxy.armoriq.io",
+    proxy_url="https://customer-proxy.armoriq.ai",
     timeout=60
 )
 
@@ -326,7 +326,7 @@ token = client.get_intent_token(
 
 **Method 2: Visual Policy Builder (ArmorIQ Canvas)**
 
-Use the drag-and-drop interface at [https://armoriq.io/dashboard/policies:](https://armoriq.io/dashboard/policies:)
+Use the drag-and-drop interface at [https://platform.armoriq.ai/dashboard/policies:](https://platform.armoriq.ai/dashboard/policies:)
 
 1. Click "Canvas" button to open visual builder  
 2. Drag users, MCPs, and agents onto canvas  
@@ -348,7 +348,7 @@ token = client.get_intent_token(
 # Or fetch policy JSON from API and use directly
 import requests
 policy_response = requests.get(
-   f"https://api.armoriq.io/policies/f88cf4c7-732d-44ff-901b-fd3d882c2ecf",
+   f"https://customer-api.armoriq.ai/policies/f88cf4c7-732d-44ff-901b-fd3d882c2ecf",
    headers={"Authorization": f"Bearer {user_jwt}"}
 )
 policy = policy_response.json()["data"]["permissions"]
@@ -1223,7 +1223,7 @@ export ARMORIQ_USER_ID="user_12345"
 export ARMORIQ_AGENT_ID="my_agent_v1"
 
 # Optional
-export ARMORIQ_PROXY_URL="https://proxy.armoriq.io"
+export ARMORIQ_PROXY_URL="https://customer-proxy.armoriq.ai"
 export ARMORIQ_TIMEOUT="30"
 export ARMORIQ_MAX_RETRIES="3"
 export ARMORIQ_VERIFY_SSL="true"
@@ -1240,7 +1240,7 @@ user_id: user_12345
 agent_id: my_agent_v1
 
 proxy:
-  url: https://proxy.armoriq.io
+  url: https://customer-proxy.armoriq.ai
   timeout: 30
   max_retries: 3
   verify_ssl: true
@@ -1362,7 +1362,7 @@ result = client.invoke("data-mcp", "delete_data", token, {})  # ✗
 # Test connectivity
 import requests
 
-proxy_url = "https://proxy.armoriq.io"
+proxy_url = "https://customer-proxy.armoriq.ai"
 
 try:
     response = requests.get(f"{proxy_url}/health", timeout=5)
