@@ -27,7 +27,7 @@ pip install armoriq-sdk
 
 ### 1. Get Your API Key
 
-Visit [dashboard.armoriq.io](https://platform.armoriq.ai) to generate your API key.
+Visit [platform.armoriq.ai](https://platform.armoriq.ai) to generate your API key.
 
 ### 2. Initialize the Client
 
@@ -93,7 +93,7 @@ For complete documentation, visit [docs.armoriq.ai](https://docs.armoriq.ai)
 
 - [armoriq.ai](https://armoriq.ai)
 - [docs.armoriq.ai](https://docs.armoriq.ai)
-- [dashboard.armoriq.io](https://platform.armoriq.ai)
+- [platform.armoriq.io](https://platform.armoriq.ai)
 
 ---
 
