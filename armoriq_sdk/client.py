@@ -417,7 +417,8 @@ class ArmorIQClient:
 
         # Call Backend token issuance endpoint (SDK → Backend → CSRG-IAP)
         try:
-            headers = {"X-API-Key": self.api_key}
+            # Use industry-standard Authorization header with Bearer token
+            headers = {"Authorization": f"Bearer {self.api_key}"}
             response = self.http_client.post(
                 f"{self.backend_endpoint}/iap/sdk/token",
                 json=payload,
@@ -567,7 +568,8 @@ class ArmorIQClient:
         }
         
         # IMPORTANT: Include API key for customer SDK authentication
-        # The proxy needs this to detect customer SDK mode and skip JWT verification
+        # NOTE: Proxy expects X-API-Key header (not Authorization) for API key validation
+        # Authorization header is used for token issuance (Backend), X-API-Key for tool execution (Proxy)
         if self.api_key:
             headers["X-API-Key"] = self.api_key
         
