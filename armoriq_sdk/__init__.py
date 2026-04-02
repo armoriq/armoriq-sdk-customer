@@ -34,3 +34,10 @@ __all__ = [
     "MCPInvocation",
     "DelegationResult",
 ]
+
+# Optional framework integrations (each requires its own extra to be installed)
+try:
+    from .integrations import ArmorIQCrew, ArmorIQLangChain, ArmorIQGoogleADK, ArmorIQOpenAI, ArmorIQAnthropic
+    __all__ += ["ArmorIQCrew", "ArmorIQLangChain", "ArmorIQGoogleADK", "ArmorIQOpenAI", "ArmorIQAnthropic"]
+except Exception:
+    pass
