@@ -17,6 +17,7 @@ Environment variables:
     ARMORIQ_API_KEY  — your ArmorIQ API key  (required)
     USER_ID          — your user identifier   (required)
     AGENT_ID         — your agent identifier  (required)
+    OPENAI_API_KEY   — OpenAI API key         (required by CrewAI)
 
 Run:
     python examples/crewai_integration.py
@@ -84,6 +85,10 @@ def build_crew(client: ArmorIQClient) -> ArmorIQCrew:
     weather_tool = GetWeatherTool()
     forecast_tool = GetForecastTool()
 
+    # CrewAI accepts the model name as a plain string on the Agent.
+    # Define it once so both the Agent and ArmorIQCrew reference the same value.
+    model = "gpt-4o"
+
     # Standard CrewAI agent — nothing ArmorIQ-specific here
     meteorologist = Agent(
         role="Meteorologist",
@@ -93,6 +98,7 @@ def build_crew(client: ArmorIQClient) -> ArmorIQCrew:
             "atmospheric data and communicating forecasts clearly."
         ),
         tools=[weather_tool, forecast_tool],
+        llm=model,
         verbose=True,
     )
 
@@ -111,14 +117,15 @@ def build_crew(client: ArmorIQClient) -> ArmorIQCrew:
 
     # ArmorIQCrew wraps crewai.Crew.
     # - armoriq_client: your initialised ArmorIQClient
-    # - llm: the LLM identifier passed to capture_plan (informational)
+    # - llm: model name string passed to capture_plan for audit purposes;
+    #        should match the LLM you passed to the Agent above
     # - token_validity_seconds: how long the issued intent token is valid
     # All other kwargs are forwarded to crewai.Crew.
     return ArmorIQCrew(
         agents=[meteorologist],
         tasks=[current_weather_task, forecast_task],
         armoriq_client=client,
-        llm="gpt-4o",
+        llm=model,
         token_validity_seconds=3600.0,
         verbose=True,
     )
