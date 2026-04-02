@@ -46,6 +46,19 @@ Demonstrates agent-to-agent delegation:
 uv run python examples/delegation_example.py
 ```
 
+### CrewAI Integration
+
+Shows how to use `ArmorIQCrew` to run a CrewAI crew with automatic ArmorIQ
+intent verification on every MCP tool call:
+- Defining CrewAI tools with `mcp` and `action` attributes
+- Wrapping a standard crew with `ArmorIQCrew`
+- Automatic token issuance and MCP call routing
+
+```bash
+pip install armoriq-sdk[crewai]
+uv run python examples/crewai_integration.py
+```
+
 ### Error Handling
 
 Comprehensive error handling examples:
