@@ -9,6 +9,7 @@ from datetime import datetime
 
 import httpx
 
+from .config import load_armoriq_config
 from .models import (
     IntentToken,
     PlanCapture,
@@ -282,6 +283,34 @@ class ArmorIQClient:
     def __enter__(self):
         """Context manager entry."""
         return self
+
+    @classmethod
+    def from_config(cls, path: str = "armoriq.yaml") -> "ArmorIQClient":
+        """
+        Create a client from armoriq.yaml.
+
+        Args:
+            path: Path to armoriq.yaml
+
+        Returns:
+            Initialized ArmorIQClient
+        """
+        config = load_armoriq_config(path)
+        api_key = config.identity.resolved_api_key()
+        if not api_key:
+            raise ConfigurationException(
+                "API key resolved to empty value from config/environment."
+            )
+
+        return cls(
+            api_key=api_key,
+            user_id=config.identity.user_id,
+            agent_id=config.identity.agent_id,
+            proxy_endpoint=config.proxy.url,
+            timeout=float(config.proxy.timeout),
+            max_retries=int(config.proxy.max_retries),
+            use_production=(config.environment == "production"),
+        )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - cleanup resources."""

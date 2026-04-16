@@ -29,7 +29,12 @@ dependencies = [
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
     "cryptography>=41.0.0",
+    "PyYAML>=6.0",
 ]
+
+[project.scripts]
+armoriq = "armoriq_sdk.cli:main"
+armoriq-cli = "armoriq_sdk.cli:main"
 
 [project.optional-dependencies]
 crewai     = ["crewai>=0.28.0"]

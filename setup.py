@@ -26,6 +26,7 @@ setup(
         "httpx>=0.24.0",
         "pydantic>=2.0.0",
         "cryptography>=41.0.0",
+        "PyYAML>=6.0",
     ],
     extras_require={
         "dev": ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "black", "mypy"],
@@ -43,4 +44,10 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
     keywords="armoriq sdk ai agents security verification",
+    entry_points={
+        "console_scripts": [
+            "armoriq=armoriq_sdk.cli:main",
+            "armoriq-cli=armoriq_sdk.cli:main",
+        ]
+    },
 )
