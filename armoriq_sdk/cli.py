@@ -36,7 +36,26 @@ CHECK = "\u2713"
 STATE_DIR = Path.home() / ".armoriq"
 STATE_FILE = STATE_DIR / "state.json"
 LOG_FILE = STATE_DIR / "cli.log"
-CONTROL_PLANE_REGISTER_ENDPOINT = "https://customer-api.armoriq.ai/sdk/register"
+import os as _os
+
+from ._build_env import resolve as _resolve_env_endpoint
+
+# Precedence for the /iap/sdk/register URL:
+#   1. ARMORIQ_REGISTER_URL — full URL override (power user / CI)
+#   2. BACKEND_ENDPOINT or ARMORIQ_BACKEND_URL — append /iap/sdk/register
+#   3. ARMORIQ_ENV (env var) — picks "production" or "staging" from _build_env
+#   4. _build_env.ARMORIQ_ENV baked-in default (production on main, staging on dev)
+def _resolve_control_plane_endpoint() -> str:
+    explicit = _os.getenv("ARMORIQ_REGISTER_URL")
+    if explicit:
+        return explicit
+    backend = _os.getenv("BACKEND_ENDPOINT") or _os.getenv("ARMORIQ_BACKEND_URL")
+    if backend:
+        return f"{backend.rstrip('/')}/iap/sdk/register"
+    return f"{_resolve_env_endpoint('backend').rstrip('/')}/iap/sdk/register"
+
+
+CONTROL_PLANE_REGISTER_ENDPOINT = _resolve_control_plane_endpoint()
 
 
 class CLIError(RuntimeError):
@@ -174,12 +193,31 @@ def discover_mcp_tools(server: MCPServerConfig, timeout: float = 8.0) -> MCPDisc
 
 
 def validate_api_key(api_key: str, proxy_url: str, timeout: float = 8.0) -> None:
+    """Verify the API key by hitting either the backend's SDK bootstrap
+    endpoint (local dev) or the proxy's health endpoint (prod default).
+
+    Precedence:
+      1. BACKEND_ENDPOINT / ARMORIQ_BACKEND_URL env var → POST {backend}/iap/sdk/bootstrap
+      2. proxy_url arg → GET {proxy}/health
+
+    The bootstrap path is preferred when available — it's more strict
+    (actually resolves org + agent from the key), while /health only
+    returns 200/401.
+    """
     resolved_key = resolve_env_reference(api_key)
     if not resolved_key:
         raise CLIError("API key is empty. Set ARMORIQ_API_KEY or update identity.api_key.")
     headers = {"X-API-Key": resolved_key}
+    backend = _os.getenv("BACKEND_ENDPOINT") or _os.getenv("ARMORIQ_BACKEND_URL")
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        response = client.get(f"{proxy_url.rstrip('/')}/health", headers=headers)
+        if backend:
+            response = client.post(
+                f"{backend.rstrip('/')}/iap/sdk/bootstrap",
+                headers={**headers, "Content-Type": "application/json"},
+                json={},
+            )
+        else:
+            response = client.get(f"{proxy_url.rstrip('/')}/health", headers=headers)
         if response.status_code == 401:
             raise CLIError("API key authentication failed (401).")
         if response.status_code >= 400:
