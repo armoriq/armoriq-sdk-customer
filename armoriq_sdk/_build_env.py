@@ -14,7 +14,7 @@ Users can always override at runtime via:
   - explicit constructor args on ArmorIQClient
 """
 
-ARMORIQ_ENV: str = "production"
+ARMORIQ_ENV: str = "staging"
 
 # Endpoint table — keep in sync with GCP Cloud Run domain mappings
 # (verified via `gcloud beta run domain-mappings describe --domain=...`).
