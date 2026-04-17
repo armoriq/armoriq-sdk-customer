@@ -5,13 +5,14 @@ This file is the ONLY difference between the `dev` and `main` branches —
 merging dev → main conflicts on this single constant, which is intentional
 so the release owner consciously flips the default before publishing prod.
 
-  main branch  →  ARMORIQ_ENV = "production"  (CLI + SDK default to api.armoriq.io)
-  dev  branch  →  ARMORIQ_ENV = "staging"     (CLI + SDK default to staging-api.armoriq.io)
+  main branch  →  ARMORIQ_ENV = "production"  (prod URLs; published as stable)
+  dev  branch  →  ARMORIQ_ENV = "staging"     (staging URLs; published as -dev)
 
-Users can always override at runtime via:
-  - ARMORIQ_ENV env var
-  - BACKEND_ENDPOINT / ARMORIQ_BACKEND_URL env vars
-  - explicit constructor args on ArmorIQClient
+The baked constant is the ONLY source of truth for which environment's
+URLs to use — no runtime env-var override. To point the SDK at staging,
+install the dev build; to override a specific endpoint for testing,
+pass `backend_endpoint=...` to the ArmorIQClient constructor or set
+BACKEND_ENDPOINT / IAP_ENDPOINT / PROXY_ENDPOINT env vars.
 """
 
 ARMORIQ_ENV: str = "staging"
@@ -41,9 +42,4 @@ ENDPOINTS = {
 
 
 def resolve(kind: str) -> str:
-    import os
-
-    override = os.getenv("ARMORIQ_ENV", ARMORIQ_ENV).lower()
-    if override not in ENDPOINTS:
-        override = "production"
-    return ENDPOINTS[override][kind]
+    return ENDPOINTS[ARMORIQ_ENV][kind]
