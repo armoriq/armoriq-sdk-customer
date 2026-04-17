@@ -79,9 +79,9 @@ class ArmorIQClient:
     # Prod defaults (staging values live in armoriq_sdk/_build_env.py).
     # _build_env.resolve() is consulted first so a staging-branch build
     # automatically picks staging URLs without changing these literals.
-    DEFAULT_IAP_ENDPOINT = "https://iap.armoriq.io"
-    DEFAULT_PROXY_ENDPOINT = "https://cloud-run-proxy.armoriq.io"
-    DEFAULT_BACKEND_ENDPOINT = "https://api.armoriq.io"
+    DEFAULT_IAP_ENDPOINT = "https://iap.armoriq.ai"
+    DEFAULT_PROXY_ENDPOINT = "https://proxy.armoriq.ai"
+    DEFAULT_BACKEND_ENDPOINT = "https://api.armoriq.ai"
 
     ARMORCLAW_IAP_ENDPOINT = "https://iap.armorclaw.io"
     ARMORCLAW_PROXY_ENDPOINT = "https://proxy.armorclaw.io"

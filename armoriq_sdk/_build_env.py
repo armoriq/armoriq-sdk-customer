@@ -18,16 +18,24 @@ ARMORIQ_ENV: str = "staging"
 
 # Endpoint table — keep in sync with GCP Cloud Run domain mappings
 # (verified via `gcloud beta run domain-mappings describe --domain=...`).
+#   prod:
+#     api.armoriq.ai        → conmap-auto            (us-central1)
+#     iap.armoriq.ai        → csrg-execution-service (us-central1)
+#     proxy.armoriq.ai      → armoriq-proxy-server   (us-central1)
+#   staging:
+#     staging-api.armoriq.ai          → conmap-auto-staging            (us-central1)
+#     csrg-execution-service-staging* → csrg-execution-service-staging (us-central1; no custom domain yet)
+#     cloud-run-proxy.armoriq.io      → armoriq-proxy-dev              (europe-west1)
 ENDPOINTS = {
     "production": {
-        "backend": "https://api.armoriq.io",
-        "proxy": "https://cloud-run-proxy.armoriq.io",
-        "iap": "https://iap.armoriq.io",
+        "backend": "https://api.armoriq.ai",
+        "proxy": "https://proxy.armoriq.ai",
+        "iap": "https://iap.armoriq.ai",
     },
     "staging": {
-        "backend": "https://staging-api.armoriq.io",
-        "proxy": "https://staging-proxy.armoriq.io",
-        "iap": "https://staging-iap.armoriq.io",
+        "backend": "https://staging-api.armoriq.ai",
+        "proxy": "https://cloud-run-proxy.armoriq.io",
+        "iap": "https://csrg-execution-service-staging-77dabykria-uc.a.run.app",
     },
 }
 
