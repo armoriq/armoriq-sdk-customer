@@ -15,7 +15,7 @@ pass `backend_endpoint=...` to the ArmorIQClient constructor or set
 BACKEND_ENDPOINT / IAP_ENDPOINT / PROXY_ENDPOINT env vars.
 """
 
-ARMORIQ_ENV: str = "staging"
+ARMORIQ_ENV: str = "production"
 
 # Endpoint table — keep in sync with GCP Cloud Run domain mappings
 # (verified via `gcloud beta run domain-mappings describe --domain=...`).
