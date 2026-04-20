@@ -25,7 +25,7 @@ ARMORIQ_ENV: str = "staging"
 #     proxy.armoriq.ai      → armoriq-proxy-server   (us-central1)
 #   staging:
 #     staging-api.armoriq.ai          → conmap-auto-staging            (us-central1)
-#     csrg-execution-service-staging* → csrg-execution-service-staging (us-central1; no custom domain yet)
+#     iap-staging.armoriq.ai          → csrg-execution-service-staging (us-central1)
 #     cloud-run-proxy.armoriq.io      → armoriq-proxy-dev              (europe-west1)
 ENDPOINTS = {
     "production": {
@@ -36,7 +36,7 @@ ENDPOINTS = {
     "staging": {
         "backend": "https://staging-api.armoriq.ai",
         "proxy": "https://cloud-run-proxy.armoriq.io",
-        "iap": "https://csrg-execution-service-staging-77dabykria-uc.a.run.app",
+        "iap": "https://iap-staging.armoriq.ai",
     },
 }
 

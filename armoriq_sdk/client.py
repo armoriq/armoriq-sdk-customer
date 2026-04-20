@@ -116,6 +116,14 @@ class ArmorIQClient:
         use_prod = use_production and (env_mode == "production")
 
         resolved_api_key = api_key or os.getenv("ARMORIQ_API_KEY") or ""
+        if not resolved_api_key:
+            try:
+                from .credentials import load_credentials
+                creds = load_credentials()
+                if creds:
+                    resolved_api_key = creds.apiKey
+            except Exception:
+                pass
         is_armorclaw = resolved_api_key.startswith("ak_claw_")
 
         # For non-armorclaw keys, let _build_env pick staging vs production

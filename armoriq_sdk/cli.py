@@ -525,6 +525,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Continue streaming new log lines",
     )
     logs_parser.set_defaults(func=cmd_logs)
+
+    from .cli_auth import cmd_login, cmd_logout, cmd_whoami
+
+    login_parser = subparsers.add_parser(
+        "login", help="Log in to ArmorIQ via browser (OAuth device-code flow)"
+    )
+    login_parser.add_argument("--backend", help="Override backend URL")
+    login_parser.set_defaults(func=cmd_login)
+
+    logout_parser = subparsers.add_parser("logout", help="Remove saved credentials")
+    logout_parser.set_defaults(func=cmd_logout)
+
+    whoami_parser = subparsers.add_parser(
+        "whoami", help="Show current authentication status"
+    )
+    whoami_parser.set_defaults(func=cmd_whoami)
+
     return parser
 
 
