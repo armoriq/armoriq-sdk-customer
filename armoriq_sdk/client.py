@@ -1,74 +1,99 @@
 """
 ArmorIQ SDK Client - Main entry point for SDK usage.
+
+Python port of armoriq-sdk-customer-ts/src/client.ts. Kept at feature
+parity so either SDK can drive the same backend.
 """
 
-import os
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import json
 import logging
-from typing import Any, Dict, Optional, Union
+import os
+import re
+import time
 from datetime import datetime
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 import httpx
 
+from .config import load_armoriq_config
+from .exceptions import (
+    ConfigurationException,
+    DelegationException,
+    IntentMismatchException,
+    InvalidTokenException,
+    MCPInvocationException,
+    PolicyBlockedException,
+    PolicyHoldException,
+    TokenExpiredException,
+)
 from .models import (
+    ApprovedDelegation,
+    DelegationRequestParams,
+    DelegationRequestResult,
+    DelegationResult,
+    HoldInfo,
     IntentToken,
-    PlanCapture,
+    InvokeOptions,
     MCPInvocation,
     MCPInvocationResult,
-    DelegationRequest,
-    DelegationResult,
+    MCPSemanticMetadata,
+    PlanCapture,
+    PolicyContext,
     SDKConfig,
 )
-from .exceptions import (
-    InvalidTokenException,
-    IntentMismatchException,
-    MCPInvocationException,
-    DelegationException,
-    TokenExpiredException,
-    ConfigurationException,
-)
+
+if TYPE_CHECKING:
+    from .session import ArmorIQSession, SessionOptions
 
 logger = logging.getLogger(__name__)
+
+SDK_VERSION = "0.2.12"
+
+
+class _EnforcementResponse(Exception):
+    """Internal sentinel carrying a structured /invoke enforcement response."""
+
+    def __init__(self, data: Dict[str, Any], status_code: int):
+        super().__init__(data.get("message") or "enforcement")
+        self.data = data
+        self.status_code = status_code
 
 
 class ArmorIQClient:
     """
     Main client for ArmorIQ SDK.
-    
+
     Provides high-level APIs for:
     - Plan capture and canonicalization
     - Intent token management
     - MCP action invocation
     - Agent delegation
-    
-    Example:
-        >>> # Production (default endpoints)
-        >>> client = ArmorIQClient(
-        ...     user_id="user123",
-        ...     agent_id="my-agent"
-        ... )
-        >>> 
-        >>> # Development/Local
-        >>> client = ArmorIQClient(
-        ...     iap_endpoint="http://localhost:8082",
-        ...     proxy_endpoint="http://localhost:3001",
-        ...     user_id="user123",
-        ...     agent_id="my-agent"
-        ... )
-        >>> 
-        >>> plan = client.capture_plan("gpt-4", "Book a flight to Paris")
-        >>> token = client.get_intent_token(plan)
-        >>> result = client.invoke("travel-mcp", "book_flight", token)
+    - Policy-aware invocation with hold/approval flows
     """
-    
-    # Production endpoints (default) - Customer-facing services
-    DEFAULT_IAP_ENDPOINT = "https://customer-iap.armoriq.ai"  # CSRG-IAP (Ed25519 tokens)
-    DEFAULT_PROXY_ENDPOINT = "https://customer-proxy.armoriq.ai"  # Proxy server (validation only)
-    DEFAULT_BACKEND_ENDPOINT = "https://customer-api.armoriq.ai"  # Backend (IAP token issuance)
-    
-    # Local development endpoints
-    LOCAL_IAP_ENDPOINT = "http://localhost:8080"  # Local CSRG-IAP
-    LOCAL_PROXY_ENDPOINT = "http://localhost:3001"  # Local proxy
-    LOCAL_BACKEND_ENDPOINT = "http://localhost:3000"  # Local Backend (conmap-auto)
+
+    # Prod defaults (staging values live in armoriq_sdk/_build_env.py).
+    # _build_env.resolve() is consulted first so a staging-branch build
+    # automatically picks staging URLs without changing these literals.
+    DEFAULT_IAP_ENDPOINT = "https://iap.armoriq.ai"
+    DEFAULT_PROXY_ENDPOINT = "https://proxy.armoriq.ai"
+    DEFAULT_BACKEND_ENDPOINT = "https://api.armoriq.ai"
+
+    ARMORCLAW_IAP_ENDPOINT = "https://iap.armorclaw.io"
+    ARMORCLAW_PROXY_ENDPOINT = "https://proxy.armorclaw.io"
+    ARMORCLAW_BACKEND_ENDPOINT = "https://api.armorclaw.io"
+
+    LOCAL_IAP_ENDPOINT = "http://127.0.0.1:8000"
+    LOCAL_PROXY_ENDPOINT = "http://127.0.0.1:3001"
+    LOCAL_BACKEND_ENDPOINT = "http://127.0.0.1:3000"
+
+    LOCAL_ARMORCLAW_IAP_ENDPOINT = "http://127.0.0.1:8080"
+    LOCAL_ARMORCLAW_PROXY_ENDPOINT = "http://127.0.0.1:3001"
+    LOCAL_ARMORCLAW_BACKEND_ENDPOINT = "http://127.0.0.1:8081"
 
     def __init__(
         self,
@@ -84,142 +109,96 @@ class ArmorIQClient:
         verify_ssl: bool = True,
         api_key: Optional[str] = None,
         use_production: bool = True,
+        mcp_credentials: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        _skip_api_key_validation: bool = False,
     ):
-        """
-        Initialize ArmorIQ client.
-        
-        The SDK supports both production and local development modes:
-        
-        **Production Mode (default):**
-        - IAP: https://customer-iap.armoriq.ai
-        - Proxy: https://customer-proxy.armoriq.ai
-        - ConMap: https://customer-api.armoriq.ai
-        
-        **Local Development Mode:**
-        - IAP: http://localhost:8080
-        - Proxy: http://localhost:3001
-        - ConMap: http://localhost:3000
-        
-        Args:
-            iap_endpoint: IAP service endpoint URL (overrides defaults)
-            proxy_endpoint: Default proxy endpoint URL (overrides defaults)
-            proxy_endpoints: Dict mapping MCP names to specific proxy URLs
-            user_id: User identifier (or USER_ID env var)
-            agent_id: Agent identifier (or AGENT_ID env var)
-            context_id: Optional context identifier
-            timeout: Request timeout in seconds
-            max_retries: Maximum retry attempts
-            verify_ssl: Whether to verify SSL certificates
-            api_key: API key for authentication (required)
-            use_production: Use production endpoints (default: True). Set False for local development.
-            
-        Raises:
-            ConfigurationException: If required configuration is missing
-            
-        Environment Variables:
-            ARMORIQ_API_KEY: API key for authentication (required)
-            USER_ID: User identifier (required if not passed as arg)
-            AGENT_ID: Agent identifier (required if not passed as arg)
-            CONTEXT_ID: Context identifier (default: "default")
-            ARMORIQ_ENV: Set to "development" to use local endpoints
-            IAP_ENDPOINT: Override IAP endpoint
-            PROXY_ENDPOINT: Override default proxy endpoint
-            
-        Examples:
-            >>> # Production (default)
-            >>> client = ArmorIQClient(
-            ...     api_key="ak_live_...",
-            ...     user_id="dev@company.com",
-            ...     agent_id="my-agent"
-            ... )
-            
-            >>> # Local development
-            >>> client = ArmorIQClient(
-            ...     api_key="ak_test_...",
-            ...     user_id="dev@company.com",
-            ...     agent_id="my-agent",
-            ...     use_production=False
-            ... )
-            
-            >>> # Or use environment variable
-            >>> # export ARMORIQ_ENV=development
-            >>> client = ArmorIQClient()
-        """
-        # Determine if using production based on environment
         env_mode = os.getenv("ARMORIQ_ENV", "production").lower()
         use_prod = use_production and (env_mode == "production")
-        
-        # Load IAP endpoint (priority: parameter > env var > default production/local)
-        if iap_endpoint:
-            self.iap_endpoint = iap_endpoint
-        elif os.getenv("IAP_ENDPOINT"):
-            self.iap_endpoint = os.getenv("IAP_ENDPOINT")
-        elif use_prod:
-            # Production: Use customer-facing CSRG-IAP
-            self.iap_endpoint = self.DEFAULT_IAP_ENDPOINT
-        else:
-            # Local development
-            self.iap_endpoint = self.LOCAL_IAP_ENDPOINT
-        
-        # Load proxy endpoint (for action validation only)
-        if proxy_endpoint:
-            self.default_proxy_endpoint = proxy_endpoint
-        elif os.getenv("PROXY_ENDPOINT"):
-            self.default_proxy_endpoint = os.getenv("PROXY_ENDPOINT")
-        elif use_prod:
-            # Production: Use customer-facing proxy
-            self.default_proxy_endpoint = self.DEFAULT_PROXY_ENDPOINT
-        else:
-            # Local development
-            self.default_proxy_endpoint = self.LOCAL_PROXY_ENDPOINT
-        
-        # Load backend endpoint (for token issuance - IAP calls go through backend)
-        if backend_endpoint:
-            self.backend_endpoint = backend_endpoint
-        elif os.getenv("BACKEND_ENDPOINT"):
-            self.backend_endpoint = os.getenv("BACKEND_ENDPOINT")
-        elif use_prod:
-            # Production: Use customer-facing backend
-            self.backend_endpoint = self.DEFAULT_BACKEND_ENDPOINT
-        else:
-            # Local development
-            self.backend_endpoint = self.LOCAL_BACKEND_ENDPOINT
-        
-        # Load user/agent identifiers
-        self.user_id = user_id or os.getenv("USER_ID")
-        self.agent_id = agent_id or os.getenv("AGENT_ID")
-        self.context_id = context_id or os.getenv("CONTEXT_ID", "default")
-        self.api_key = api_key or os.getenv("ARMORIQ_API_KEY")
 
-        # Validate required config
+        resolved_api_key = api_key or os.getenv("ARMORIQ_API_KEY") or ""
+        if not resolved_api_key:
+            try:
+                from .credentials import load_credentials
+                creds = load_credentials()
+                if creds:
+                    resolved_api_key = creds.apiKey
+            except Exception:
+                pass
+        is_armorclaw = resolved_api_key.startswith("ak_claw_")
+
+        # For non-armorclaw keys, let _build_env pick staging vs production
+        # based on the SDK branch (and ARMORIQ_ENV env var override).
+        from ._build_env import resolve as _env_resolve
+
+        def _env_default(kind: str, local_default: str) -> str:
+            if not use_prod:
+                return local_default
+            if is_armorclaw:
+                return {
+                    "iap": self.ARMORCLAW_IAP_ENDPOINT,
+                    "proxy": self.ARMORCLAW_PROXY_ENDPOINT,
+                    "backend": self.ARMORCLAW_BACKEND_ENDPOINT,
+                }[kind]
+            return _env_resolve(kind)
+
+        # Endpoint resolution: param > env > branch-aware default
+        self.iap_endpoint = (
+            iap_endpoint
+            or os.getenv("IAP_ENDPOINT")
+            or _env_default("iap", self.LOCAL_IAP_ENDPOINT)
+        )
+        self.default_proxy_endpoint = (
+            proxy_endpoint
+            or os.getenv("PROXY_ENDPOINT")
+            or _env_default("proxy", self.LOCAL_PROXY_ENDPOINT)
+        )
+        self.backend_endpoint = (
+            backend_endpoint
+            or os.getenv("BACKEND_ENDPOINT")
+            or _env_default("backend", self.LOCAL_BACKEND_ENDPOINT)
+        )
+
+        self.user_id = user_id or os.getenv("USER_ID") or ""
+        self.agent_id = agent_id or os.getenv("AGENT_ID") or ""
+        self.context_id = context_id or os.getenv("CONTEXT_ID", "default")
+        self.api_key = resolved_api_key
+        self.user_email_override: Optional[str] = None
+
         if not self.api_key:
             raise ConfigurationException(
                 "API key is required for Customer SDK. "
                 "Set ARMORIQ_API_KEY environment variable or pass api_key parameter. "
                 "Get your API key from https://platform.armoriq.ai/dashboard/api-keys"
             )
-        
-        # Validate API key format (ak_live_ or ak_test_ prefix)
-        if not (self.api_key.startswith("ak_live_") or self.api_key.startswith("ak_test_")):
+
+        if not (
+            self.api_key.startswith("ak_live_")
+            or self.api_key.startswith("ak_test_")
+            or self.api_key.startswith("ak_claw_")
+        ):
             raise ConfigurationException(
-                f"Invalid API key format. API keys must start with 'ak_live_' or 'ak_test_'. "
-                f"Get your API key from https://platform.armoriq.ai/dashboard/api-keys"
+                "Invalid API key format. API keys must start with 'ak_live_', "
+                "'ak_claw_', or 'ak_test_'. "
+                "Get your API key from https://platform.armoriq.ai/dashboard/api-keys"
             )
-        
+
+        # user_id/agent_id are legacy identifiers. In the forUser(email)
+        # pattern they're resolved per-request from the API key + email on
+        # conmap-auto, so they can be empty here.
         if not self.user_id:
-            raise ConfigurationException("user_id is required (set USER_ID env var)")
+            self.user_id = "__sdk_multiuser__"
         if not self.agent_id:
-            raise ConfigurationException("agent_id is required (set AGENT_ID env var)")
+            self.agent_id = "__sdk_multiuser__"
 
         self.proxy_endpoints = proxy_endpoints or {}
         self.timeout = timeout
         self.max_retries = max_retries
         self.verify_ssl = verify_ssl
 
-        # Initialize HTTP client
-        headers = {"User-Agent": f"ArmorIQ-SDK/0.1.0 (agent={self.agent_id})"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers = {
+            "User-Agent": f"ArmorIQ-SDK-PY/{SDK_VERSION} (agent={self.agent_id})",
+            "Authorization": f"Bearer {self.api_key}",
+        }
 
         self.http_client = httpx.Client(
             timeout=timeout,
@@ -228,69 +207,281 @@ class ArmorIQClient:
             follow_redirects=True,
         )
 
-        # Token cache
         self._token_cache: Dict[str, IntentToken] = {}
+        self._metadata_cache: Dict[str, MCPSemanticMetadata] = {}
+        self._mcp_credentials: Dict[str, Dict[str, Any]] = self._resolve_mcp_credentials(
+            mcp_credentials
+        )
 
         logger.info(
-            f"ArmorIQ SDK initialized: mode={'production' if use_prod else 'development'}, "
-            f"user={self.user_id}, agent={self.agent_id}, "
-            f"iap={self.iap_endpoint}, proxy={self.default_proxy_endpoint}, "
-            f"backend={self.backend_endpoint}, "
-            f"api_key={'***' + self.api_key[-8:] if self.api_key else 'None'}"
+            "ArmorIQ SDK initialized: mode=%s, user=%s, agent=%s, iap=%s, "
+            "proxy=%s, backend=%s, api_key=%s",
+            "production" if use_prod else "development",
+            self.user_id,
+            self.agent_id,
+            self.iap_endpoint,
+            self.default_proxy_endpoint,
+            self.backend_endpoint,
+            "***" + self.api_key[-8:],
         )
-        
-        # Validate API key with proxy on initialization
-        self._validate_api_key()
+
+        if not _skip_api_key_validation:
+            self._validate_api_key()
 
     @property
     def proxy_endpoint(self) -> str:
-        """Get the default proxy endpoint URL."""
         return self.default_proxy_endpoint
-    
-    def _validate_api_key(self):
+
+    # ─── Session handle ────────────────────────────────────────────────
+
+    def start_session(self, opts: Optional["SessionOptions"] = None) -> "ArmorIQSession":
         """
-        Validate API key with the proxy server.
-        This is called during initialization to ensure the API key is valid.
+        Open a new session for one LLM turn / one plan. Use this with a
+        framework integration (ADK, LangChain, CrewAI, etc.) to compress
+        the capture-plan / mint-token / invoke-tool dance into two calls.
         """
+        from .session import ArmorIQSession  # local import to avoid cycles
+
+        return ArmorIQSession(self, opts)
+
+    # ─── Multi-user convenience (mirrors TS ArmorIQADK.forUser) ─────────
+
+    def bootstrap(self) -> Dict[str, Any]:
+        """
+        Resolve agent identity + registered MCPs + tool→MCP map from the
+        API key. Hits ``POST /iap/sdk/bootstrap``. Cached for the lifetime
+        of the client — call ``refresh_bootstrap()`` to force a re-fetch.
+        """
+        cached = getattr(self, "_bootstrap_cache", None)
+        if cached is not None:
+            return cached
+        resp = self.http_client.post(
+            f"{self.backend_endpoint}/iap/sdk/bootstrap",
+            headers={"X-API-Key": self.api_key, "Content-Type": "application/json"},
+            json={},
+        )
+        if resp.status_code >= 400:
+            raise ConfigurationException(
+                f"sdk/bootstrap failed: {resp.status_code} {resp.text}"
+            )
+        data = resp.json()
+        self._bootstrap_cache = data
+        return data
+
+    def refresh_bootstrap(self) -> Dict[str, Any]:
+        """Force re-fetch of the bootstrap payload (MCP list, toolMap)."""
+        self._bootstrap_cache = None
+        return self.bootstrap()
+
+    def resolve_user(self, user_email: str) -> Dict[str, Any]:
+        """
+        Resolve a user's membership, applicable policies, and approver
+        chain by email. Hits ``POST /iap/sdk/resolve-user``. Cached per
+        email for ``user_context_ttl_seconds`` (default 300s).
+        """
+        ttl = getattr(self, "user_context_ttl_seconds", 300)
+        cache = getattr(self, "_user_cache", None)
+        if cache is None:
+            cache = {}
+            self._user_cache = cache
+        key = user_email.strip().lower()
+        hit = cache.get(key)
+        if hit and hit["expires_at"] > time.time():
+            return hit["data"]
+        resp = self.http_client.post(
+            f"{self.backend_endpoint}/iap/sdk/resolve-user",
+            headers={"X-API-Key": self.api_key, "Content-Type": "application/json"},
+            json={"userEmail": key},
+        )
+        if resp.status_code >= 400:
+            raise ConfigurationException(
+                f"sdk/resolve-user failed for {key}: {resp.status_code} {resp.text}"
+            )
+        data = resp.json()
+        cache[key] = {"data": data, "expires_at": time.time() + ttl}
+        return data
+
+    def invalidate_user(self, user_email: str) -> None:
+        cache = getattr(self, "_user_cache", None)
+        if cache is not None:
+            cache.pop(user_email.strip().lower(), None)
+
+    def for_user(self, user_email: str) -> "ArmorIQUserScope":
+        """
+        Return a user-scoped helper. All enforcement / token minting /
+        audit done through it is tagged with ``user_email``, so multi-
+        user agents can route per-request policies correctly without
+        mutating client-level state.
+
+        Usage:
+            client = ArmorIQClient(api_key=..., ...)
+            scoped = client.for_user("alice@co.com")
+            session = scoped.start_session(SessionOptions(mode="sdk"))
+            session.start_plan([...])
+            decision = session.check("tool_name", {...})
+        """
+        return ArmorIQUserScope(self, user_email)
+
+    # ─── MCP credential resolution ─────────────────────────────────────
+
+    @staticmethod
+    def _resolve_mcp_credentials(
+        from_options: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Resolve per-MCP credentials from env + constructor option.
+
+        Precedence (later wins):
+          1. ARMORIQ_MCP_CREDENTIALS (JSON blob)
+          2. ARMORIQ_MCP_<SAFE_NAME>_* per-MCP env vars
+          3. constructor option ``mcp_credentials``
+        """
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        json_raw = os.getenv("ARMORIQ_MCP_CREDENTIALS")
+        if json_raw:
+            try:
+                parsed = json.loads(json_raw)
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        merged[k] = dict(v)
+            except Exception as e:
+                logger.warning(
+                    "Failed to parse ARMORIQ_MCP_CREDENTIALS as JSON: %s", e
+                )
+
+        safe_names = set()
+        for key in os.environ:
+            m = re.match(r"^ARMORIQ_MCP_(.+)_AUTH_TYPE$", key)
+            if m:
+                safe_names.add(m.group(1))
+        for safe_name in safe_names:
+            auth_type = os.environ.get(f"ARMORIQ_MCP_{safe_name}_AUTH_TYPE", "").lower()
+            cred: Optional[Dict[str, Any]] = None
+            if auth_type == "bearer":
+                token = os.environ.get(f"ARMORIQ_MCP_{safe_name}_TOKEN")
+                if token:
+                    cred = {"authType": "bearer", "token": token}
+            elif auth_type == "api_key":
+                api_key = os.environ.get(f"ARMORIQ_MCP_{safe_name}_API_KEY")
+                header_name = os.environ.get(f"ARMORIQ_MCP_{safe_name}_HEADER_NAME")
+                if api_key:
+                    cred = {"authType": "api_key", "apiKey": api_key}
+                    if header_name:
+                        cred["headerName"] = header_name
+            elif auth_type == "basic":
+                username = os.environ.get(f"ARMORIQ_MCP_{safe_name}_USERNAME")
+                password = os.environ.get(f"ARMORIQ_MCP_{safe_name}_PASSWORD")
+                if username and password:
+                    cred = {"authType": "basic", "username": username, "password": password}
+            elif auth_type == "none":
+                cred = {"authType": "none"}
+            if cred:
+                merged[safe_name] = cred
+
+        if from_options:
+            for k, v in from_options.items():
+                merged[k] = dict(v)
+
+        return merged
+
+    def _get_mcp_credential(self, mcp_name: str) -> Optional[Dict[str, Any]]:
+        if mcp_name in self._mcp_credentials:
+            return self._mcp_credentials[mcp_name]
+        safe = re.sub(r"[^A-Z0-9]", "_", mcp_name.upper())
+        return self._mcp_credentials.get(safe)
+
+    @staticmethod
+    def _encode_mcp_auth_header(cred: Dict[str, Any]) -> str:
+        """
+        Encode an MCP credential as the ``X-Armoriq-MCP-Auth`` header value.
+        Base64 wrapping avoids header-character issues; not encryption — TLS
+        handles confidentiality.
+        """
+        return base64.b64encode(
+            json.dumps(cred, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+
+    # ─── Bootstrap / teardown ──────────────────────────────────────────
+
+    def _validate_api_key(self) -> None:
+        """Validate API key with the proxy server."""
         try:
-            # Make a simple health check with the API key
-            headers = {"X-API-Key": self.api_key}
             response = self.http_client.get(
                 f"{self.proxy_endpoint}/health",
-                headers=headers,
-                timeout=5.0
+                headers={"X-API-Key": self.api_key},
+                timeout=5.0,
             )
-            
             if response.status_code == 401:
                 raise ConfigurationException(
-                    f"Invalid API key. Please check your API key at https://platform.armoriq.ai/dashboard/api-keys"
+                    "Invalid API key. Please check your API key at "
+                    "https://platform.armoriq.ai/dashboard/api-keys"
                 )
             elif response.status_code >= 400:
-                logger.warning(f"API key validation returned status {response.status_code}, but continuing...")
+                logger.warning(
+                    "API key validation returned status %s, but continuing...",
+                    response.status_code,
+                )
             else:
-                logger.info(f"✅ API key validated successfully")
-                
-        except httpx.ConnectError:
-            logger.warning(f"Could not connect to proxy at {self.proxy_endpoint} for API key validation")
-        except httpx.TimeoutException:
-            logger.warning(f"Timeout connecting to proxy at {self.proxy_endpoint} for API key validation")
+                logger.info("API key validated successfully")
         except ConfigurationException:
             raise
+        except httpx.ConnectError:
+            logger.warning(
+                "Could not connect to proxy at %s for API key validation",
+                self.proxy_endpoint,
+            )
+        except httpx.TimeoutException:
+            logger.warning(
+                "Timeout connecting to proxy at %s for API key validation",
+                self.proxy_endpoint,
+            )
         except Exception as e:
-            logger.warning(f"API key validation check failed: {e}, but continuing...")
+            logger.warning("API key validation check failed: %s, but continuing...", e)
 
     def __enter__(self):
-        """Context manager entry."""
         return self
 
+    @classmethod
+    def from_config(cls, path: str = "armoriq.yaml") -> "ArmorIQClient":
+        """
+        Create a client from armoriq.yaml.
+
+        Args:
+            path: Path to armoriq.yaml
+
+        Returns:
+            Initialized ArmorIQClient
+        """
+        config = load_armoriq_config(path)
+        api_key = config.identity.resolved_api_key()
+        if not api_key:
+            raise ConfigurationException(
+                "API key resolved to empty value from config/environment."
+            )
+
+        return cls(
+            api_key=api_key,
+            user_id=config.identity.user_id,
+            agent_id=config.identity.agent_id,
+            proxy_endpoint=config.proxy.url,
+            timeout=float(config.proxy.timeout),
+            max_retries=int(config.proxy.max_retries),
+            use_production=(config.environment == "production"),
+        )
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - cleanup resources."""
         self.close()
 
-    def close(self):
+    def close(self) -> None:
         """Close HTTP client and cleanup resources."""
-        self.http_client.close()
+        try:
+            self.http_client.close()
+        except Exception:
+            pass
         logger.debug("ArmorIQ SDK client closed")
+
+    # ─── Plan / Token ──────────────────────────────────────────────────
 
     def capture_plan(
         self,
@@ -299,75 +490,26 @@ class ArmorIQClient:
         plan: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> PlanCapture:
-        """
-        Capture an execution plan structure.
-        
-        The plan is simply validated and stored. Hash and Merkle tree
-        generation happens later in get_intent_token() on the CSRG-IAP service.
-        
-        This method takes either:
-        1. An LLM identifier and prompt (will call LLM to generate plan), OR
-        2. A pre-generated plan dictionary
-        
-        Args:
-            llm: LLM identifier (e.g., "gpt-4", "claude-3")
-            prompt: User prompt or instruction
-            plan: Optional pre-generated plan (if None, will use LLM)
-            metadata: Optional metadata to attach
-            
-        Returns:
-            PlanCapture with plan structure (hash/Merkle created later by CSRG-IAP)
-            
-        Example:
-            >>> plan = client.capture_plan("gpt-4", "Book flight and hotel")
-            >>> print(f"Plan has {len(plan.plan['steps'])} steps")
-        """
-        logger.info(f"Capturing plan: llm={llm}, prompt={prompt[:50]}...")
+        """Capture an execution plan structure."""
+        logger.info("Capturing plan: llm=%s, prompt=%s...", llm, prompt[:50])
 
-        # Plan must be provided by the user
-        # Users should define their plan based on their onboarded MCPs and tools
         if plan is None:
             raise ValueError(
                 "Plan structure is required. "
-                "You must provide an explicit plan with the MCP and actions you want to execute.\n\n"
-                "Example:\n"
-                "  plan = client.capture_plan(\n"
-                "      llm='gpt-4',\n"
-                "      prompt='Your task description',\n"
-                "      plan={\n"
-                "          'goal': 'Your task description',\n"
-                "          'steps': [\n"
-                "              {\n"
-                "                  'action': 'your_tool_name',\n"
-                "                  'mcp': 'your-mcp-name',\n"
-                "                  'params': {'param1': 'value1'}\n"
-                "              }\n"
-                "          ]\n"
-                "      }\n"
-                "  )\n\n"
-                "Note: Use the MCP name and tool names from your onboarded MCPs on the ArmorIQ platform."
+                "You must provide an explicit plan with the MCP and actions you want to execute."
             )
-
-        # Validate plan structure
         if not isinstance(plan, dict):
             raise ValueError("Plan must be a dictionary")
-        
         if "steps" not in plan:
             raise ValueError("Plan must contain 'steps' key")
 
-        # Return PlanCapture with just the plan structure
-        # Hash and Merkle tree will be created by CSRG-IAP service
         capture = PlanCapture(
             plan=plan,
             llm=llm,
             prompt=prompt,
             metadata=metadata or {},
         )
-
-        logger.info(
-            "Plan captured with %d steps",
-            len(plan.get("steps", [])),
-        )
+        logger.info("Plan captured with %d steps", len(plan.get("steps", [])))
         return capture
 
     def get_intent_token(
@@ -376,37 +518,13 @@ class ArmorIQClient:
         policy: Optional[Dict[str, Any]] = None,
         validity_seconds: float = 60.0,
     ) -> IntentToken:
-        """
-        Request a signed intent token from IAP for the given plan.
-        
-        The CSRG-IAP service will:
-        - Convert plan to Merkle tree structure
-        - Calculate SHA-256 hash from canonical representation
-        - Sign with Ed25519
-        - Return token with hash and merkle_root
-        
-        Args:
-            plan_capture: PlanCapture from capture_plan()
-            policy: Optional policy manifest (defaults to allow-all)
-            validity_seconds: Token validity duration in seconds
-            
-        Returns:
-            IntentToken containing signed token and metadata
-            
-        Raises:
-            InvalidTokenException: If token issuance fails
-            
-        Example:
-            >>> plan = client.capture_plan("gpt-4", "Book flight")
-            >>> token = client.get_intent_token(plan)
-            >>> print(f"Token expires: {token.expires_at}")
-        """
-        logger.info(f"Requesting intent token for plan with {len(plan_capture.plan.get('steps', []))} steps")
+        """Request a signed intent token from IAP for the given plan."""
+        logger.info(
+            "Requesting intent token for plan with %d steps",
+            len(plan_capture.plan.get("steps", [])),
+        )
 
-        # Prepare request payload for Backend /iap/sdk/token endpoint
-        # The Backend will call CSRG-IAP to create hash and Merkle tree
-        # NOTE: IAP calls go through Backend, NOT through Proxy
-        payload = {
+        payload: Dict[str, Any] = {
             "user_id": self.user_id,
             "agent_id": self.agent_id,
             "context_id": self.context_id,
@@ -414,43 +532,94 @@ class ArmorIQClient:
             "policy": policy,
             "expires_in": validity_seconds,
         }
+        if self.user_email_override:
+            payload["user_email"] = self.user_email_override
 
-        # Call Backend token issuance endpoint (SDK → Backend → CSRG-IAP)
         try:
-            # Use industry-standard Authorization header with Bearer token
-            headers = {"Authorization": f"Bearer {self.api_key}"}
             response = self.http_client.post(
                 f"{self.backend_endpoint}/iap/sdk/token",
                 json=payload,
-                headers=headers,
-                timeout=30.0
+                headers={"X-API-Key": self.api_key},
+                timeout=30.0,
             )
-            response.raise_for_status()
-            data = response.json()
 
+            if response.status_code >= 400:
+                response_data: Any
+                try:
+                    response_data = response.json()
+                except Exception:
+                    response_data = {"message": response.text}
+                denied_tools = (
+                    response_data.get("policy_validation", {}).get("denied_tools")
+                    if isinstance(response_data, dict)
+                    else None
+                )
+                denied_reasons = (
+                    response_data.get("policy_validation", {}).get("denied_reasons")
+                    if isinstance(response_data, dict)
+                    else None
+                )
+                if response.status_code == 403 or (
+                    isinstance(denied_tools, list) and len(denied_tools) > 0
+                ):
+                    reason = (
+                        "; ".join(denied_reasons)
+                        if isinstance(denied_reasons, list) and denied_reasons
+                        else (
+                            response_data.get("message")
+                            if isinstance(response_data, dict)
+                            else None
+                        )
+                    ) or "Blocked by policy"
+                    raise PolicyBlockedException(
+                        f"Policy blocked intent token issuance: {reason}",
+                        enforcement_action=(
+                            response_data.get("policy_validation", {}).get(
+                                "default_enforcement_action"
+                            )
+                            if isinstance(response_data, dict)
+                            else None
+                        ),
+                        reason=reason,
+                        metadata=(
+                            response_data.get("policy_validation")
+                            if isinstance(response_data, dict)
+                            else None
+                        ),
+                    )
+                message = (
+                    response_data.get("message")
+                    if isinstance(response_data, dict)
+                    else str(response_data)
+                )
+                raise InvalidTokenException(f"Token issuance failed: {message}")
+
+            data = response.json()
             if not data.get("success"):
-                raise InvalidTokenException(f"Token issuance failed: {data.get('message', 'Unknown error')}")
-            
-            # Parse token response (now includes hash and merkle_root from CSRG-IAP)
-            token_data = data.get("token", {})
-            
-            # Add plan to token for Merkle proof generation during invoke()
+                raise InvalidTokenException(
+                    f"Token issuance failed: {data.get('message', 'Unknown error')}"
+                )
+
+            token_data = data.get("token", {}) or {}
             raw_token = {
                 "plan": plan_capture.plan,
+                "plan_id": data.get("plan_id"),
                 "token": token_data,
                 "plan_hash": data.get("plan_hash"),
                 "merkle_root": data.get("merkle_root"),
                 "intent_reference": data.get("intent_reference"),
                 "composite_identity": data.get("composite_identity", ""),
+                "step_proofs": data.get("step_proofs", []),
             }
-            
+
+            now = datetime.now().timestamp()
             token = IntentToken(
-                token_id=data.get("intent_reference", "unknown"),
+                token_id=data.get("intent_reference") or "unknown",
                 plan_hash=data.get("plan_hash", ""),
                 plan_id=data.get("plan_id"),
                 signature=token_data.get("signature", "") if isinstance(token_data, dict) else "",
-                issued_at=datetime.now().timestamp(),
-                expires_at=datetime.now().timestamp() + validity_seconds,
+                issued_at=now,
+                expires_at=now + validity_seconds,
                 policy=policy or {},
                 composite_identity=data.get("composite_identity", ""),
                 client_info=data.get("client_info"),
@@ -458,17 +627,32 @@ class ArmorIQClient:
                 step_proofs=data.get("step_proofs", []),
                 total_steps=len(plan_capture.plan.get("steps", [])),
                 raw_token=raw_token,
+                jwt_token=data.get("jwt_token"),
+                policy_snapshot=data.get("policy_snapshot"),
             )
 
-            logger.info(f"Intent token issued: id={token.token_id}, plan_hash={token.plan_hash[:16]}..., expires={token.time_until_expiry:.1f}s")
+            logger.info(
+                "Intent token issued: id=%s, plan_hash=%s..., expires=%.1fs, stepProofs=%d",
+                token.token_id,
+                token.plan_hash[:16],
+                token.time_until_expiry,
+                len(token.step_proofs or []),
+            )
+            # Cache by plan_hash for idempotency on repeated mints within validity
+            if token.plan_hash:
+                self._token_cache[token.plan_hash] = token
             return token
 
+        except (InvalidTokenException, PolicyBlockedException):
+            raise
         except httpx.HTTPStatusError as e:
-            logger.error(f"Backend returned error: {e.response.status_code} - {e.response.text}")
-            raise InvalidTokenException(f"Failed to get intent token: {e.response.text}")
+            raise InvalidTokenException(
+                f"Failed to get intent token: {e.response.text}"
+            )
         except Exception as e:
-            logger.error(f"Failed to get intent token: {e}")
-            raise InvalidTokenException(f"Failed to get intent token: {str(e)}")
+            raise InvalidTokenException(f"Failed to get intent token: {e}")
+
+    # ─── MCP invocation ────────────────────────────────────────────────
 
     def invoke(
         self,
@@ -476,40 +660,12 @@ class ArmorIQClient:
         action: str,
         intent_token: IntentToken,
         params: Optional[Dict[str, Any]] = None,
-        merkle_proof: Optional[list] = None,
+        merkle_proof: Optional[List[Any]] = None,
         user_email: Optional[str] = None,
     ) -> MCPInvocationResult:
-        """
-        Invoke an MCP action through the ArmorIQ proxy with token verification.
-        
-        Args:
-            mcp: MCP identifier (e.g., "travel-mcp", "finance-mcp")
-            action: Action name to invoke (tool name)
-            intent_token: Intent token from get_intent_token()
-            params: Optional action parameters
-            merkle_proof: Optional Merkle proof (auto-generated if not provided)
-            user_email: Optional user email (required for some MCPs)
-            
-        Returns:
-            MCPInvocationResult with action result
-            
-        Raises:
-            InvalidTokenException: If token is invalid or expired
-            IntentMismatchException: If action not in original plan
-            MCPInvocationException: If MCP invocation fails
-            
-        Example:
-            >>> result = client.invoke(
-            ...     "travel-mcp",
-            ...     "book_flight",
-            ...     token,
-            ...     params={"dest": "CDG"},
-            ...     user_email="user@example.com"
-            ... )
-        """
-        logger.info(f"Invoking MCP action: mcp={mcp}, action={action}")
+        """Invoke an MCP action through the ArmorIQ proxy with token verification."""
+        logger.info("Invoking MCP action: mcp=%s, action=%s", mcp, action)
 
-        # Check token expiry
         if intent_token.is_expired:
             raise TokenExpiredException(
                 f"Intent token expired {abs(intent_token.time_until_expiry):.1f}s ago",
@@ -517,366 +673,285 @@ class ArmorIQClient:
                 expired_at=intent_token.expires_at,
             )
 
-        # Get proxy endpoint for this MCP
-        proxy_url = self.proxy_endpoints.get(mcp)
-        if not proxy_url:
-            # Try environment variable for specific MCP
-            proxy_url = os.getenv(f"{mcp.upper()}_PROXY_URL")
-            if not proxy_url:
-                # Fall back to default proxy endpoint
-                proxy_url = self.default_proxy_endpoint
-                logger.debug(f"Using default proxy endpoint for {mcp}: {proxy_url}")
+        proxy_url = (
+            self.proxy_endpoints.get(mcp)
+            or os.getenv(f"{mcp.upper()}_PROXY_URL")
+            or self.default_proxy_endpoint
+        )
 
-        # Build IAM context from token
-        iam_context = {}
+        iam_context: Dict[str, Any] = {}
         if intent_token.policy_validation:
-            allowed_tools = intent_token.policy_validation.get("allowed_tools", [])
-            iam_context["allowed_tools"] = allowed_tools
-        
+            iam_context["allowed_tools"] = intent_token.policy_validation.get(
+                "allowed_tools", []
+            )
         if user_email:
             iam_context["email"] = user_email
             iam_context["user_email"] = user_email
-        
-        # Add user_id and other identity info
         if intent_token.raw_token:
             iam_context["user_id"] = intent_token.raw_token.get("user_id", self.user_id)
             iam_context["agent_id"] = intent_token.raw_token.get("agent_id", self.agent_id)
 
-        # Prepare invocation payload (matching armoriq-proxy-server format)
-        invoke_params = params or {}
-        invoke_params["_iam_context"] = iam_context
-        if user_email:
-            invoke_params["user_email"] = user_email
+        invoke_params: Dict[str, Any] = dict(params or {})
 
-        payload = {
+        payload: Dict[str, Any] = {
             "mcp": mcp,
             "action": action,
-            "tool": action,  # FastMCP uses 'tool' name
+            "tool": action,
             "params": invoke_params,
-            "arguments": invoke_params,  # Some MCPs use 'arguments'
+            "arguments": invoke_params,
             "intent_token": intent_token.raw_token,
             "merkle_proof": merkle_proof,
-            "plan": intent_token.raw_token.get("plan") if intent_token.raw_token else None,  # Include plan for proof generation
+            "plan": intent_token.raw_token.get("plan") if intent_token.raw_token else None,
+            "_iam_context": iam_context,
+        }
+        if user_email:
+            payload["user_email"] = user_email
+        if intent_token.policy_snapshot:
+            payload["policy_snapshot"] = intent_token.policy_snapshot
+
+        headers: Dict[str, str] = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Request-ID": f"sdk-{int(datetime.now().timestamp() * 1000)}",
+            "X-API-Key": self.api_key,
         }
 
-        # Prepare headers with CSRG token and proof headers
-        headers = {
-            "Accept": "application/json, text/event-stream",  # MCP servers require both
-            "Content-Type": "application/json",
-            "Cache-Control": "no-cache, no-store, must-revalidate",  # Prevent caching issues
-            "X-Request-ID": f"sdk-{datetime.now().timestamp()}",  # Unique request ID
-        }
-        
-        # IMPORTANT: Include API key for customer SDK authentication
-        # NOTE: Proxy expects X-API-Key header (not Authorization) for API key validation
-        # Authorization header is used for token issuance (Backend), X-API-Key for tool execution (Proxy)
-        if self.api_key:
-            headers["X-API-Key"] = self.api_key
-        
-        # Send CSRG token structure in payload
+        cred = self._get_mcp_credential(mcp)
+        if cred:
+            headers["X-Armoriq-MCP-Auth"] = self._encode_mcp_auth_header(cred)
+
         if intent_token.raw_token and isinstance(intent_token.raw_token, dict):
-            # Include the full CSRG token in payload for proxy to forward to /verify/action
             payload["token"] = intent_token.raw_token.get("token", {})
             payload["csrg_token"] = intent_token.raw_token.get("token", {})
-            
-            # IMPORTANT: For customer SDK with API key, do NOT send Authorization Bearer header
-            # The proxy uses API key auth (auth_method='api_key') to detect customer SDK mode
-            # Adding a Bearer token would make it look like enterprise SDK and cause 404
-            # Only set Authorization header for enterprise SDK (when not using API key)
-            if not self.api_key:
-                # Enterprise SDK: Send the composite_identity as Bearer token
-                auth_value = intent_token.raw_token.get("composite_identity") or intent_token.token_id
-                headers["Authorization"] = f"Bearer {auth_value}"
-        
-        # Find the step index for this action in the plan
-        # CRITICAL: Must verify against the correct LEAF node for the action being invoked
+
         plan = intent_token.raw_token.get("plan", {}) if intent_token.raw_token else {}
         steps = plan.get("steps", [])
-        
-        # Find which step contains this action
-        step_index = None
+
+        step_index: Optional[int] = None
         for idx, step in enumerate(steps):
             if isinstance(step, dict) and step.get("action") == action:
                 step_index = idx
                 break
-        
+
         if step_index is None:
+            actions = [
+                s.get("action") if isinstance(s, dict) else "unknown" for s in steps
+            ]
             raise IntentMismatchException(
                 f"Action '{action}' not found in the original plan. "
-                f"Plan contains actions: {[s.get('action') if isinstance(s, dict) else 'unknown' for s in steps]}. "
-                f"You can only invoke actions that were included in the plan when you called capture_plan()."
+                f"Plan contains actions: {actions}. "
+                "You can only invoke actions that were included in the plan "
+                "when you called capture_plan()."
             )
-        
-        # Use Merkle proof from CSRG-IAP (step_proofs) instead of generating locally
-        # CRITICAL: Merkle proof generation must ONLY be done by CSRG-IAP, not by SDK
+
         if not merkle_proof:
-            # Try to get proof from step_proofs provided by CSRG-IAP
             if intent_token.step_proofs and len(intent_token.step_proofs) > step_index:
                 merkle_proof = intent_token.step_proofs[step_index]
-                logger.debug(f"Using Merkle proof from CSRG-IAP for step {step_index}")
+                logger.debug("Using Merkle proof from CSRG-IAP for step %s", step_index)
             else:
                 logger.warning(
-                    f"No Merkle proof available for step {step_index}. "
-                    f"step_proofs length: {len(intent_token.step_proofs) if intent_token.step_proofs else 0}. "
-                    f"Note: Merkle proofs should be generated by CSRG-IAP during token issuance."
+                    "No Merkle proof available for step %s. step_proofs length: %s",
+                    step_index,
+                    len(intent_token.step_proofs or []),
                 )
-        
-        # Add CSRG proof to headers if available
+
         if merkle_proof:
-            import json
-            headers["X-CSRG-Proof"] = json.dumps(merkle_proof)
-            logger.debug(f"Added CSRG proof header for step {step_index}")
-        
-        # CSRG path points to the action leaf node
-        csrg_path = f"/steps/[{step_index}]/action"
-        headers["X-CSRG-Path"] = csrg_path
-        
-        # Value digest for CSRG verification - MUST match the actual value in the plan
-        # Get the LEAF value from the plan that was used to generate the token
-        import hashlib
-        import json
-        
-        logger.debug(f"[MERKLE DEBUG] raw_token keys: {list(intent_token.raw_token.keys()) if intent_token.raw_token else 'None'}")
-        logger.debug(f"[MERKLE DEBUG] plan from token: {plan}")
-        
-        # Extract the leaf value at the path we're verifying
-        # For /steps/[step_index]/action, the value is plan["steps"][step_index]["action"]
+            headers["X-CSRG-Proof"] = json.dumps(merkle_proof, separators=(",", ":"))
+
+        headers["X-CSRG-Path"] = f"/steps/[{step_index}]/action"
+
         step_obj = steps[step_index] if step_index < len(steps) else {}
         leaf_value = step_obj.get("action", action) if isinstance(step_obj, dict) else action
-        
-        # CRITICAL: Use the same JSON canonicalization as CSRG-IAP
-        # CSRG uses: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        value_str = json.dumps(leaf_value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        value_digest = hashlib.sha256(value_str.encode("utf-8")).hexdigest()
-        headers["X-CSRG-Value-Digest"] = value_digest
-        
-        logger.debug(f"CSRG Verification Details:")
-        logger.debug(f"  Path: {csrg_path}")
-        logger.debug(f"  Leaf Value: {leaf_value}")
-        logger.debug(f"  Value String (canonical): {value_str}")
-        logger.debug(f"  Digest: {value_digest}")
-        
-        # Call proxy
+        value_str = json.dumps(leaf_value, separators=(",", ":"))
+        headers["X-CSRG-Value-Digest"] = hashlib.sha256(
+            value_str.encode("utf-8")
+        ).hexdigest()
+
         try:
-            start_time = datetime.now()
-            
-            # Verbose logging with print for debugging
-            print(f"\n� DEBUG: Making POST request to: {proxy_url}/invoke")
-            print(f"� DEBUG: Headers: {json.dumps({k: v[:50] + '...' if len(str(v)) > 50 else v for k, v in headers.items()}, indent=2)}")
-            print(f"� DEBUG: Payload mcp={payload.get('mcp')}, action={payload.get('action')}")
-            
-            # For SSE responses, we need to read the entire stream before checking status
-            # because the status might only be available after the stream completes
-            with self.http_client.stream('POST', f"{proxy_url}/invoke", json=payload, headers=headers) as response:
-                # Debug logging
-                print(f"� DEBUG: Response status: {response.status_code}")
-                print(f"� DEBUG: Response Content-Type: {response.headers.get('content-type')}")
-                
-                # Read the entire response
-                content = b""
-                chunk_count = 0
-                for chunk in response.iter_bytes():
-                    content += chunk
-                    chunk_count += 1
-                
-                execution_time = (datetime.now() - start_time).total_seconds()
-                response_text = content.decode('utf-8')
-                print(f"🔍 DEBUG: Read {chunk_count} chunks, total {len(content)} bytes")
-                print(f"🔍 DEBUG: Response lines:")
-                for i, line in enumerate(response_text.split('\n')[:10]):
-                    print(f"🔍 DEBUG:   Line {i}: {repr(line)}")
-                
-                # Now check status after reading
-                response.raise_for_status()
-                
-                # Handle SSE format responses (text/event-stream)
-                content_type = response.headers.get('content-type', '')
-                if 'text/event-stream' in content_type:
-                    # Parse SSE format: lines starting with "data: " contain JSON
-                    logger.debug(f"Handling SSE response")
-                    data = None
-                    for line in response_text.split('\n'):
-                        if line.startswith('data: '):
-                            data_str = line[6:]  # Remove "data: " prefix
-                            try:
-                                data = json.loads(data_str)
-                                logger.debug(f"Parsed SSE data: {data}")
-                                break
-                            except json.JSONDecodeError as e:
-                                logger.warning(f"Failed to parse SSE line: {data_str}, error: {e}")
-                                continue
-                    
-                    if data is None:
-                        logger.error("No valid JSON data found in SSE response")
-                        raise MCPInvocationException("No data in SSE response", mcp=mcp, action=action)
-                else:
-                    try:
-                        data = json.loads(response_text)
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to parse JSON response: {response_text[:500]}")
-                        raise MCPInvocationException(f"Invalid JSON response", mcp=mcp, action=action)
-            
-            # Check for JSON-RPC error
-            if 'error' in data:
-                error_msg = data['error'].get('message', 'Unknown error')
-                error_code = data['error'].get('code', -1)
-                error_data = data['error'].get('data', '')
+            start = time.time()
+            response = self.http_client.post(
+                f"{proxy_url}/invoke", json=payload, headers=headers
+            )
+            execution_time = time.time() - start
+
+            try:
+                response_data: Any = response.json()
+            except Exception:
+                response_data = None
+
+            content_type = response.headers.get("content-type", "")
+            data: Dict[str, Any]
+            if "text/event-stream" in content_type and isinstance(response.text, str):
+                data = {}
+                for line in response.text.split("\n"):
+                    if line.startswith("data: "):
+                        try:
+                            data = json.loads(line[6:])
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                if not data:
+                    raise MCPInvocationException(
+                        "No data in SSE response", mcp=mcp, action=action
+                    )
+            else:
+                data = response_data if isinstance(response_data, dict) else {}
+
+            if isinstance(data, dict) and data.get("enforcement"):
+                raise _EnforcementResponse(data, response.status_code)
+
+            if response.status_code >= 400:
+                self._raise_http_error(response, mcp, action, intent_token)
+
+            if isinstance(data, dict) and data.get("error") and not data.get("enforcement"):
+                err = data["error"]
+                error_msg = err.get("message", "Unknown error")
+                error_code = err.get("code", -1)
+                error_data = err.get("data", "")
                 raise MCPInvocationException(
                     f"MCP tool error ({error_code}): {error_msg} - {error_data}",
                     mcp=mcp,
-                    action=action
+                    action=action,
                 )
-            
-            # Extract result from JSON-RPC response
-            result_data = data.get('result', data)
 
-            # Extract result from JSON-RPC response
-            result_data = data.get('result', data)
-
+            result_data = data.get("result", data) if isinstance(data, dict) else data
+            has_tool_error = bool(
+                (isinstance(result_data, dict) and (result_data.get("isError") or result_data.get("is_error") or result_data.get("error")))
+            )
             result = MCPInvocationResult(
                 mcp=mcp,
                 action=action,
                 result=result_data,
-                status="success",
+                status="error" if has_tool_error else "success",
                 execution_time=execution_time,
                 verified=True,
-                metadata={},
+                metadata={"hasToolError": has_tool_error},
             )
 
-            logger.info(f"MCP invocation succeeded: {action} in {execution_time:.2f}s")
+            logger.info(
+                "MCP invocation %s: %s in %.2fs",
+                "returned error payload" if has_tool_error else "succeeded",
+                action,
+                execution_time,
+            )
             return result
 
+        except _EnforcementResponse as env:
+            enforcement = env.data.get("enforcement") or {}
+            message = env.data.get("message") or f"Enforcement: {enforcement.get('action')}"
+            if enforcement.get("action") == "block":
+                raise PolicyBlockedException(
+                    message,
+                    enforcement_action=enforcement.get("action"),
+                    reason=enforcement.get("reason"),
+                    metadata=enforcement.get("metadata"),
+                )
+            raise PolicyHoldException(
+                message,
+                delegation_context=env.data.get("delegation_context"),
+                metadata=enforcement.get("metadata"),
+            )
+        except (
+            MCPInvocationException,
+            IntentMismatchException,
+            InvalidTokenException,
+            PolicyBlockedException,
+            PolicyHoldException,
+        ):
+            raise
         except httpx.HTTPStatusError as e:
-            status_code = e.response.status_code
-            
-            # Safely read error detail from response
-            try:
-                # Check if response is already read
-                if hasattr(e.response, '_content'):
-                    error_detail = e.response.text
-                else:
-                    # For streaming responses, read the content first
-                    error_detail = e.response.read().decode('utf-8')
-            except Exception:
-                error_detail = f"Status {status_code}"
-
-            # Parse specific error types
-            if status_code == 401 or status_code == 403:
-                raise InvalidTokenException(f"Token verification failed: {error_detail}")
-            elif status_code == 409:
-                raise IntentMismatchException(
-                    f"Action not in plan: {error_detail}",
-                    action=action,
-                    plan_hash=intent_token.plan_hash,
-                )
-            else:
-                raise MCPInvocationException(
-                    f"MCP invocation failed: {error_detail}",
-                    mcp=mcp,
-                    action=action,
-                    status_code=status_code,
-                )
-
+            self._raise_http_error(e.response, mcp, action, intent_token)
         except Exception as e:
-            logger.error(f"MCP invocation error: {e}")
-            raise MCPInvocationException(f"MCP invocation failed: {str(e)}", mcp=mcp, action=action)
+            raise MCPInvocationException(
+                f"MCP invocation failed: {e}", mcp=mcp, action=action
+            )
+
+    @staticmethod
+    def _raise_http_error(
+        response: httpx.Response,
+        mcp: str,
+        action: str,
+        intent_token: IntentToken,
+    ) -> None:
+        try:
+            detail: Any = response.json()
+        except Exception:
+            detail = response.text
+        status_code = response.status_code
+        if status_code in (401, 403):
+            raise InvalidTokenException(f"Token verification failed: {detail}")
+        if status_code == 409:
+            raise IntentMismatchException(
+                f"Action not in plan: {detail}",
+                action=action,
+                plan_hash=intent_token.plan_hash,
+            )
+        raise MCPInvocationException(
+            f"MCP invocation failed: {detail}",
+            mcp=mcp,
+            action=action,
+            status_code=status_code,
+        )
+
+    # ─── Delegation (legacy CSRG path) ─────────────────────────────────
 
     def delegate(
         self,
         intent_token: IntentToken,
         delegate_public_key: str,
         validity_seconds: int = 3600,
-        allowed_actions: Optional[list] = None,
+        allowed_actions: Optional[List[str]] = None,
         target_agent: Optional[str] = None,
         subtask: Optional[Dict[str, Any]] = None,
     ) -> DelegationResult:
-        """
-        Delegate authority to another agent using CSRG token delegation.
-        
-        Args:
-            intent_token: Intent token to delegate
-            delegate_public_key: Public key of the delegate agent (Ed25519 hex format)
-            validity_seconds: Delegation validity in seconds (default: 3600)
-            allowed_actions: Optional list of allowed actions (defaults to all from original token)
-            target_agent: Optional target agent identifier (deprecated, use delegate_public_key)
-            subtask: Optional subtask plan (deprecated, use allowed_actions)
-            
-        Returns:
-            DelegationResult with delegated token
-            
-        Raises:
-            DelegationException: If delegation creation fails
-            InvalidTokenException: If original token is invalid
-            
-        Example:
-            >>> # Generate delegate keypair
-            >>> from cryptography.hazmat.primitives.asymmetric import ed25519
-            >>> delegate_private_key = ed25519.Ed25519PrivateKey.generate()
-            >>> delegate_public_key = delegate_private_key.public_key()
-            >>> pub_key_bytes = delegate_public_key.public_bytes(
-            ...     encoding=serialization.Encoding.Raw,
-            ...     format=serialization.PublicFormat.Raw
-            ... )
-            >>> pub_key_hex = pub_key_bytes.hex()
-            >>> 
-            >>> result = client.delegate(
-            ...     token,
-            ...     delegate_public_key=pub_key_hex,
-            ...     validity_seconds=1800
-            ... )
-        """
+        """Delegate authority to another agent using CSRG token delegation."""
         logger.info(
-            f"Creating delegation for token_id={intent_token.token_id}, "
-            f"delegate_key={delegate_public_key[:16]}..., validity={validity_seconds}s"
+            "Creating delegation for token_id=%s, delegate_key=%s..., validity=%ds",
+            intent_token.token_id,
+            delegate_public_key[:16],
+            validity_seconds,
         )
 
-        # Extract the inner token dict from raw_token
-        # raw_token has structure: {intent_reference, token, plan_hash, ...}
-        # CSRG-IAP /delegation/create expects just the inner 'token' dict
-        token_to_delegate = intent_token.raw_token
-        
-        # If raw_token is the response structure, extract the inner token
+        token_to_delegate: Any = intent_token.raw_token
         if isinstance(token_to_delegate, dict) and "token" in token_to_delegate:
             token_to_delegate = token_to_delegate["token"]
 
-        # Prepare delegation request matching CsrgDelegationRequest
-        payload = {
+        payload: Dict[str, Any] = {
             "token": token_to_delegate,
             "delegate_public_key": delegate_public_key,
             "validity_seconds": validity_seconds,
         }
-        
-        # Add allowed_actions if specified
         if allowed_actions:
             payload["allowed_actions"] = allowed_actions
-        
-        # Legacy support for target_agent/subtask
         if target_agent:
             payload["target_agent"] = target_agent
         if subtask:
             payload["subtask"] = subtask
 
-        # Call IAP delegation endpoint
         try:
             response = self.http_client.post(
                 f"{self.iap_endpoint}/delegation/create",
                 json=payload,
                 timeout=10.0,
             )
-            response.raise_for_status()
-            data = response.json()
+            if response.status_code >= 400:
+                raise DelegationException(
+                    f"Delegation failed: {response.text}",
+                    target_agent=target_agent,
+                    status_code=response.status_code,
+                )
 
-            # Parse delegation response
-            # CSRG-IAP returns {"delegation": {...}} structure
-            delegated_token_data = data.get("delegation") or data.get("delegated_token") or data.get("new_token")
+            data = response.json()
+            delegated_token_data = (
+                data.get("delegation") or data.get("delegated_token") or data.get("new_token")
+            )
             if not delegated_token_data:
                 raise DelegationException(
                     f"Delegation response missing 'delegation' key. Got keys: {list(data.keys())}",
                     delegation_id=data.get("delegation_id"),
                 )
 
-            # Create IntentToken from delegated token
-            # Delegation response has minimal structure, map to IntentToken fields
             delegated_token = IntentToken(
                 token_id=delegated_token_data.get("token_id", ""),
                 plan_hash=delegated_token_data.get("plan_hash", intent_token.plan_hash),
@@ -890,10 +965,10 @@ class ArmorIQClient:
                 policy_validation=delegated_token_data.get("policy_validation"),
                 step_proofs=delegated_token_data.get("step_proofs", []),
                 total_steps=delegated_token_data.get("total_steps", 0),
-                raw_token={"token": delegated_token_data},  # Wrap in expected structure
+                raw_token={"token": delegated_token_data},
             )
 
-            result = DelegationResult(
+            return DelegationResult(
                 delegation_id=data.get("delegation_id", delegated_token.token_id),
                 delegated_token=delegated_token,
                 delegate_public_key=delegate_public_key,
@@ -903,51 +978,379 @@ class ArmorIQClient:
                 status="delegated",
                 metadata=data.get("metadata", {}),
             )
-
-            logger.info(f"Delegation successful: delegation_id={result.delegation_id}")
-            return result
-
+        except DelegationException:
+            raise
         except httpx.HTTPStatusError as e:
-            logger.error(f"Delegation failed: {e.response.status_code} - {e.response.text}")
             raise DelegationException(
                 f"Delegation failed: {e.response.text}",
-                delegation_id=data.get("delegation_id") if 'data' in locals() else None,
+                target_agent=target_agent,
                 status_code=e.response.status_code,
             )
         except Exception as e:
-            logger.error(f"Delegation request error: {str(e)}")
-            raise DelegationException(f"Delegation request error: {str(e)}") from e
-            logger.error(f"Delegation error: {e}")
-            raise DelegationException(f"Delegation failed: {str(e)}", target_agent=target_agent)
+            raise DelegationException(f"Delegation failed: {e}", target_agent=target_agent)
 
     def verify_token(self, intent_token: IntentToken) -> bool:
-        """
-        Verify an intent token with IAP.
-        
-        Note: This is mainly for testing. In production, the proxy
-        handles all token verification via Merkle proof checking.
-        
-        Args:
-            intent_token: Token to verify
-            
-        Returns:
-            True if token is valid, False otherwise
-        """
+        """Local-only token validation (expiry + required-field checks)."""
         try:
-            # Perform local token validation
-            # Check expiration
             if intent_token.is_expired:
-                logger.warning(f"Token {intent_token.token_id} has expired")
+                logger.warning("Token %s has expired", intent_token.token_id)
                 return False
-            
-            # Check required fields
             if not intent_token.signature or not intent_token.plan_hash:
-                logger.warning(f"Token {intent_token.token_id} missing required fields")
+                logger.warning("Token %s missing required fields", intent_token.token_id)
                 return False
-            
-            logger.info(f"Token {intent_token.token_id} is valid (expires in {intent_token.time_until_expiry:.1f}s)")
+            logger.info(
+                "Token %s is valid (expires in %.1fs)",
+                intent_token.token_id,
+                intent_token.time_until_expiry,
+            )
             return True
-            
         except Exception as e:
-            logger.error(f"Token verification failed: {e}")
+            logger.error("Token verification failed: %s", e)
             return False
+
+    # ─── Semantic metadata & policy context ────────────────────────────
+
+    def fetch_tool_metadata(self, mcp_name: str) -> MCPSemanticMetadata:
+        """Fetch and cache semantic tool metadata for an MCP server."""
+        cached = self._metadata_cache.get(mcp_name)
+        if cached is not None:
+            return cached
+
+        try:
+            response = self.http_client.get(
+                f"{self.backend_endpoint}/mcp/tool-metadata/{mcp_name}",
+                headers={"X-API-Key": self.api_key},
+            )
+            if response.status_code >= 400:
+                logger.warning(
+                    "Failed to fetch tool metadata for %s: %s",
+                    mcp_name,
+                    response.status_code,
+                )
+                return MCPSemanticMetadata(mcp_id="", name=mcp_name)
+            body = response.json() or {}
+            payload = body.get("data") or {
+                "mcpId": "",
+                "name": mcp_name,
+                "toolMetadata": {},
+                "roleMapping": {},
+            }
+            metadata = MCPSemanticMetadata.model_validate(payload)
+            self._metadata_cache[mcp_name] = metadata
+            return metadata
+        except Exception as e:
+            logger.warning("Could not fetch tool metadata for %s: %s", mcp_name, e)
+            return MCPSemanticMetadata(mcp_id="", name=mcp_name)
+
+    def load_mcp(self, mcp_name: str) -> None:
+        """Eagerly load semantic metadata for an MCP."""
+        self.fetch_tool_metadata(mcp_name)
+
+    def list_mcps(self) -> List[Dict[str, Any]]:
+        """List all MCPs registered for this org (resolved via API key)."""
+        response = self.http_client.get(
+            f"{self.backend_endpoint}/mcp/my-servers",
+            headers={"X-API-Key": self.api_key},
+        )
+        if response.status_code >= 400:
+            raise MCPInvocationException(
+                f"list_mcps failed: {response.status_code} {response.text}"
+            )
+        body = response.json() or {}
+        return body.get("data", []) or []
+
+    def get_mcp_tool_schemas(self, mcp_name: str) -> List[Any]:
+        """Get full OpenAI-compatible tool schemas for a named MCP."""
+        response = self.http_client.get(
+            f"{self.backend_endpoint}/mcp/tools/{mcp_name}",
+            headers={"X-API-Key": self.api_key},
+        )
+        if response.status_code >= 400:
+            raise MCPInvocationException(
+                f"get_mcp_tool_schemas({mcp_name}) failed: "
+                f"{response.status_code} {response.text}"
+            )
+        body = response.json() or {}
+        return (body.get("data") or {}).get("tools", []) or []
+
+    def _enrich_policy_context(
+        self,
+        mcp_name: str,
+        tool_name: str,
+        params: Dict[str, Any],
+    ) -> PolicyContext:
+        """Enrich policy context from semantic metadata for a tool invocation."""
+        metadata = self.fetch_tool_metadata(mcp_name)
+        tool_meta = metadata.tool_metadata.get(tool_name) if metadata.tool_metadata else None
+
+        if not tool_meta or not tool_meta.is_financial:
+            return PolicyContext(is_financial=False)
+
+        amount: Optional[float] = None
+        if tool_meta.amount_fields:
+            for field in tool_meta.amount_fields:
+                if params.get(field) is not None:
+                    try:
+                        raw = float(params[field])
+                        amount = raw / 100 if tool_meta.amount_unit == "cents" else raw
+                        break
+                    except (TypeError, ValueError):
+                        continue
+
+        return PolicyContext(
+            is_financial=True,
+            transaction_type=tool_meta.transaction_type or tool_name,
+            amount=amount,
+            recipient_id=(
+                params.get(tool_meta.recipient_field) if tool_meta.recipient_field else None
+            ),
+        )
+
+    def resolve_role(self, mcp_name: str, org_role: str) -> str:
+        """Resolve an org role to a domain-specific role for an MCP."""
+        metadata = self.fetch_tool_metadata(mcp_name)
+        return metadata.role_mapping.get(org_role, org_role)
+
+    # ─── Delegation automation ─────────────────────────────────────────
+
+    def _resolve_user_role(self, user_email: str) -> Dict[str, Any]:
+        """Resolve the user's role and limit from the backend for delegation."""
+        try:
+            response = self.http_client.get(
+                f"{self.backend_endpoint}/delegation/my-role",
+                headers={
+                    "X-API-Key": self.api_key,
+                    "X-User-Email": user_email,
+                },
+                timeout=5.0,
+            )
+            if response.status_code < 400:
+                body = response.json()
+                if body.get("role"):
+                    return {"role": body["role"], "limit": body.get("limit", 0)}
+        except Exception:
+            pass
+        return {"role": "agent_user", "limit": 0}
+
+    def create_delegation_request(
+        self, params: DelegationRequestParams
+    ) -> DelegationRequestResult:
+        """Create a delegation request on the backend."""
+        body = params.model_dump(by_alias=True, exclude_none=True)
+        response = self.http_client.post(
+            f"{self.backend_endpoint}/delegation/request",
+            json=body,
+            headers={
+                "X-API-Key": self.api_key,
+                "X-User-Email": params.requester_email,
+            },
+        )
+        if response.status_code >= 400:
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+            raise DelegationException(
+                f"Failed to create delegation request: {data.get('message', response.text)}"
+            )
+        return DelegationRequestResult.model_validate(response.json())
+
+    def check_approved_delegation(
+        self, user_email: str, tool: str, amount: float
+    ) -> Optional[ApprovedDelegation]:
+        """Check if a delegation request has been approved."""
+        response = self.http_client.get(
+            f"{self.backend_endpoint}/delegation/check-approved",
+            params={"tool": tool, "amount": amount},
+            headers={"X-API-Key": self.api_key, "X-User-Email": user_email},
+        )
+        if response.status_code >= 400:
+            return None
+        try:
+            data = response.json()
+        except Exception:
+            return None
+        if not data or not data.get("approved"):
+            return None
+        return ApprovedDelegation.model_validate(data)
+
+    def mark_delegation_executed(self, user_email: str, delegation_id: str) -> None:
+        """Mark a delegation as executed."""
+        self.http_client.post(
+            f"{self.backend_endpoint}/delegation/mark-executed",
+            json={"delegationId": delegation_id},
+            headers={"X-API-Key": self.api_key, "X-User-Email": user_email},
+        )
+
+    def complete_plan(self, plan_id: str) -> None:
+        """Mark an intent plan as completed after all tools have been executed."""
+        self.update_plan_status(plan_id, "completed")
+
+    def update_plan_status(self, plan_id: str, status: str) -> None:
+        """Update an intent plan's status."""
+        try:
+            self.http_client.post(
+                f"{self.backend_endpoint}/iap/plans/{plan_id}/status",
+                json={"status": status},
+                headers={"X-API-Key": self.api_key},
+            )
+            logger.info("Plan %s status updated to %s", plan_id, status)
+        except Exception as e:
+            logger.warning("Failed to update plan %s status: %s", plan_id, e)
+
+    # ─── Enhanced invoke with policy enrichment & hold handling ────────
+
+    def invoke_with_policy(
+        self,
+        mcp: str,
+        action: str,
+        intent_token: IntentToken,
+        params: Optional[Dict[str, Any]] = None,
+        options: Optional[InvokeOptions] = None,
+    ) -> MCPInvocationResult:
+        """Invoke with automatic policy context enrichment and delegation handling."""
+        opts = options or InvokeOptions()
+        policy_context = self._enrich_policy_context(mcp, action, params or {})
+        enriched_params = dict(params or {})
+        enriched_params["_policy_context"] = policy_context.model_dump()
+
+        try:
+            return self.invoke(
+                mcp,
+                action,
+                intent_token,
+                params=enriched_params,
+                user_email=opts.user_email,
+            )
+        except PolicyBlockedException:
+            raise
+        except PolicyHoldException as hold_exc:
+            enforcement_meta = hold_exc.metadata or {}
+            requires_approval = enforcement_meta.get("requiresApproval", True)
+            if not requires_approval:
+                raise
+
+            hold_info = HoldInfo(
+                reason=str(hold_exc) or "Action held for approval",
+                amount=enforcement_meta.get("amount") or policy_context.amount,
+                approval_threshold=enforcement_meta.get("approvalThreshold"),
+                tool=action,
+                mcp=mcp,
+            )
+            if opts.on_hold:
+                opts.on_hold(hold_info)
+
+            if not opts.wait_for_approval or not opts.user_email:
+                raise
+
+            delegation_ctx = hold_exc.delegation_context or {}
+
+            requester_role = opts.requester_role or "agent_user"
+            requester_limit = opts.requester_limit or 0
+            if not opts.requester_role:
+                try:
+                    resolved = self._resolve_user_role(opts.user_email)
+                    requester_role = resolved["role"]
+                    requester_limit = resolved["limit"]
+                except Exception:
+                    pass
+
+            try:
+                delegation_result = self.create_delegation_request(
+                    DelegationRequestParams(
+                        tool=action,
+                        action="execute",
+                        arguments=params or {},
+                        amount=policy_context.amount or 0,
+                        requester_email=opts.user_email,
+                        requester_role=requester_role,
+                        requester_limit=requester_limit,
+                        domain=delegation_ctx.get("domain", mcp),
+                        target_url=delegation_ctx.get("targetUrl"),
+                        plan_id=delegation_ctx.get("planId") or intent_token.plan_id,
+                        intent_reference=delegation_ctx.get("intentReference")
+                        or intent_token.token_id,
+                        merkle_root=delegation_ctx.get("merkleRoot") or intent_token.plan_hash,
+                        reason=str(hold_exc),
+                    )
+                )
+            except Exception as delegation_error:
+                logger.error("Failed to create delegation request: %s", delegation_error)
+                raise PolicyHoldException(
+                    "Action held for approval (delegation request failed)",
+                    delegation_context=delegation_ctx,
+                    metadata={
+                        **enforcement_meta,
+                        "delegationError": str(delegation_error),
+                    },
+                )
+
+            hold_info.delegation_id = delegation_result.delegation_id
+            if opts.on_hold:
+                opts.on_hold(hold_info)
+
+            timeout_ms = opts.delegation_timeout_ms or (30 * 60 * 1000)
+            deadline = time.time() + timeout_ms / 1000
+            poll_interval = 3.0
+            while time.time() < deadline:
+                time.sleep(poll_interval)
+                poll_interval = min(poll_interval * 1.5, 15.0)
+
+                approved = self.check_approved_delegation(
+                    opts.user_email, action, policy_context.amount or 0
+                )
+                if approved:
+                    retry_params = dict(enriched_params)
+                    retry_params["_delegation_id"] = approved.delegation_id
+                    retry_params["_approvals"] = 999
+                    result = self.invoke(
+                        mcp,
+                        action,
+                        intent_token,
+                        params=retry_params,
+                        user_email=opts.user_email,
+                    )
+                    self.mark_delegation_executed(opts.user_email, approved.delegation_id)
+                    return result
+
+            raise DelegationException(
+                f"Delegation approval timed out after {timeout_ms / 1000:.0f}s",
+                delegation_id=delegation_result.delegation_id,
+            )
+
+
+class ArmorIQUserScope:
+    """
+    User-scoped helper returned by ``ArmorIQClient.for_user(email)``.
+
+    Wraps an ``ArmorIQClient`` and sets ``user_email_override`` so all
+    token minting, enforcement, and audit calls originate from this user.
+    Safe to use across concurrent requests as long as each request uses
+    its own scope (the scope copies state rather than mutating the
+    underlying client).
+
+    Usage:
+        client = ArmorIQClient(api_key=..., ...)
+        scoped = client.for_user("alice@co.com")
+        session = scoped.start_session(SessionOptions(mode="sdk"))
+        token = session.start_plan([...])
+        decision = session.check("tool", {...})
+    """
+
+    def __init__(self, client: "ArmorIQClient", user_email: str):
+        self._client = client
+        self.user_email = user_email.strip().lower()
+
+    def start_session(self, opts: Optional["SessionOptions"] = None) -> "ArmorIQSession":
+        from .session import ArmorIQSession
+
+        # Temporarily override; session will carry user_email through.
+        self._client.user_email_override = self.user_email
+        session = ArmorIQSession(self._client, opts)
+        # Attach for report()/audit paths that read from session.
+        setattr(session, "user_email", self.user_email)
+        return session
+
+    def resolve(self) -> Dict[str, Any]:
+        """Fetch this user's membership + policies + approver chain."""
+        return self._client.resolve_user(self.user_email)

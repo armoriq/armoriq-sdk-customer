@@ -1,31 +1,18 @@
 """
 Pydantic models for ArmorIQ SDK data structures.
+
+Mirrors the TypeScript SDK models at parity. Field naming uses Python's
+``snake_case`` at the API boundary; all TS interfaces have corresponding
+pydantic models here.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
 
 class IntentToken(BaseModel):
-    """
-    Represents a signed intent token from IAP.
-    
-    Attributes:
-        token_id: Unique identifier for this token (intent_reference)
-        plan_hash: CSRG hash of the canonical plan
-        plan_id: Plan ID from IAP
-        signature: Ed25519 signature from IAP
-        issued_at: Token issuance timestamp
-        expires_at: Token expiration timestamp
-        policy: Policy manifest applied to this token
-        composite_identity: Composite identity hash (user+agent+context)
-        client_info: Client information (clientId, clientName, orgId)
-        policy_validation: Policy validation result with allowed_tools
-        step_proofs: Array of Merkle proofs for each step
-        total_steps: Total number of steps in plan
-        raw_token: Full raw token payload
-    """
+    """Represents a signed intent token from IAP."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -41,11 +28,15 @@ class IntentToken(BaseModel):
     policy_validation: Optional[Dict[str, Any]] = Field(
         None, description="Policy validation with allowed_tools"
     )
-    step_proofs: List[Dict[str, Any]] = Field(
+    step_proofs: List[Any] = Field(
         default_factory=list, description="Merkle proofs for steps"
     )
     total_steps: int = Field(0, description="Total steps in plan")
     raw_token: Dict[str, Any] = Field(..., description="Full raw token payload")
+    jwt_token: Optional[str] = Field(None, description="JWT token for verify-step endpoint")
+    policy_snapshot: Optional[List[Dict[str, Any]]] = Field(
+        None, description="OPA-formatted policy snapshot for proxy → OPA enforcement"
+    )
 
     @property
     def is_expired(self) -> bool:
@@ -61,16 +52,10 @@ class IntentToken(BaseModel):
 class PlanCapture(BaseModel):
     """
     Represents a captured plan ready for token issuance.
-    
+
     The plan structure contains only the steps the agent intends to execute.
-    Hash and Merkle tree generation happens later in get_intent_token() 
+    Hash and Merkle tree generation happen later in ``get_intent_token()``
     on the CSRG-IAP service side.
-    
-    Attributes:
-        plan: Plan structure with steps
-        llm: LLM identifier used to generate the plan
-        prompt: Original prompt used
-        metadata: Additional metadata
     """
 
     plan: Dict[str, Any] = Field(..., description="Plan structure with steps")
@@ -80,17 +65,7 @@ class PlanCapture(BaseModel):
 
 
 class MCPInvocation(BaseModel):
-    """
-    Represents an MCP action invocation request.
-    
-    Attributes:
-        mcp: MCP identifier
-        action: Action name to invoke (tool name)
-        params: Action parameters
-        intent_token: Intent token for verification
-        merkle_proof: Optional Merkle proof for this action
-        iam_context: IAM context to pass to MCP tool (email, user_id, role, limits)
-    """
+    """Represents an MCP action invocation request."""
 
     mcp: str = Field(..., description="MCP identifier")
     action: str = Field(..., description="Action to invoke (tool name)")
@@ -100,22 +75,12 @@ class MCPInvocation(BaseModel):
         None, description="Merkle proof for action"
     )
     iam_context: Optional[Dict[str, Any]] = Field(
-        None, description="IAM context (email, loan_role, loan_limit, allowed_tools)"
+        None, description="IAM context (email, user_id, role, limits)"
     )
 
 
 class MCPInvocationResult(BaseModel):
-    """
-    Result from an MCP action invocation.
-    
-    Attributes:
-        mcp: MCP identifier
-        action: Action that was invoked
-        result: Action result data
-        status: Execution status
-        execution_time: Time taken to execute (seconds)
-        verified: Whether token verification succeeded
-    """
+    """Result from an MCP action invocation."""
 
     mcp: str = Field(..., description="MCP identifier")
     action: str = Field(..., description="Action invoked")
@@ -127,17 +92,7 @@ class MCPInvocationResult(BaseModel):
 
 
 class DelegationRequest(BaseModel):
-    """
-    Request for delegating a subtask to another agent.
-    
-    Attributes:
-        target_agent: Target agent identifier
-        subtask: Subtask plan to delegate
-        intent_token: Current intent token
-        trust_policy: Optional trust policy for delegation
-        delegate_public_key: Public key of delegate agent
-        validity_seconds: Token validity in seconds
-    """
+    """Request for delegating a subtask to another agent."""
 
     target_agent: str = Field(..., description="Target agent identifier")
     subtask: Dict[str, Any] = Field(..., description="Subtask to delegate")
@@ -150,19 +105,7 @@ class DelegationRequest(BaseModel):
 
 
 class DelegationResult(BaseModel):
-    """
-    Result from a delegation request.
-    
-    Attributes:
-        delegation_id: Unique delegation identifier
-        delegated_token: New intent token for the delegated subtask
-        delegate_public_key: Public key of the delegate agent
-        target_agent: Optional target agent identifier
-        expires_at: Expiration timestamp
-        trust_delta: Trust update applied
-        status: Delegation status
-        metadata: Extra metadata
-    """
+    """Result from a delegation request."""
 
     delegation_id: str = Field(..., description="Delegation identifier")
     delegated_token: IntentToken = Field(..., description="Delegated intent token")
@@ -172,29 +115,170 @@ class DelegationResult(BaseModel):
     trust_delta: Dict[str, Any] = Field(default_factory=dict, description="Trust delta")
     status: str = Field("delegated", description="Delegation status")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extra metadata")
-    
-    # Deprecated fields for backwards compatibility
+
     @property
     def new_token(self) -> IntentToken:
-        """Alias for delegated_token (deprecated)"""
+        """Alias for delegated_token (deprecated)."""
         return self.delegated_token
 
 
-class SDKConfig(BaseModel):
+class ToolSemanticEntry(BaseModel):
+    """Semantic metadata for a single tool on an MCP server."""
+
+    is_financial: Optional[bool] = Field(None, alias="isFinancial")
+    transaction_type: Optional[str] = Field(None, alias="transactionType")
+    amount_fields: Optional[List[str]] = Field(None, alias="amountFields")
+    amount_unit: Optional[str] = Field(None, alias="amountUnit")
+    currency: Optional[str] = None
+    recipient_field: Optional[str] = Field(None, alias="recipientField")
+    category: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+
+class MCPSemanticMetadata(BaseModel):
+    """Semantic metadata for an MCP server (tool annotations + role mapping)."""
+
+    mcp_id: str = Field("", alias="mcpId")
+    name: str = ""
+    tool_metadata: Dict[str, ToolSemanticEntry] = Field(
+        default_factory=dict, alias="toolMetadata"
+    )
+    role_mapping: Dict[str, str] = Field(default_factory=dict, alias="roleMapping")
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+
+class PolicyContext(BaseModel):
+    """Policy context enriched from semantic metadata."""
+
+    is_financial: bool = False
+    transaction_type: Optional[str] = None
+    amount: Optional[float] = None
+    recipient_id: Optional[str] = None
+
+
+class HoldInfo(BaseModel):
+    """Information about a hold enforcement action."""
+
+    delegation_id: Optional[str] = None
+    reason: str
+    amount: Optional[float] = None
+    approval_threshold: Optional[float] = None
+    tool: str
+    mcp: str
+
+    model_config = ConfigDict(extra="allow")
+
+
+class InvokeOptions(BaseModel):
+    """Options for the enhanced invoke_with_policy() method."""
+
+    wait_for_approval: Optional[bool] = None
+    delegation_timeout_ms: Optional[int] = None
+    on_hold: Optional[Callable[[HoldInfo], None]] = None
+    user_email: Optional[str] = None
+    requester_role: Optional[str] = None
+    requester_limit: Optional[float] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class DelegationRequestParams(BaseModel):
+    """Parameters for creating a delegation request."""
+
+    tool: str
+    action: str
+    arguments: Optional[Dict[str, Any]] = None
+    amount: Optional[float] = None
+    requester_email: str = Field(..., alias="requesterEmail")
+    requester_role: Optional[str] = Field(None, alias="requesterRole")
+    requester_limit: Optional[float] = Field(None, alias="requesterLimit")
+    domain: Optional[str] = None
+    target_url: Optional[str] = Field(None, alias="targetUrl")
+    plan_id: Optional[str] = Field(None, alias="planId")
+    intent_reference: Optional[str] = Field(None, alias="intentReference")
+    merkle_root: Optional[str] = Field(None, alias="merkleRoot")
+    reason: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DelegationRequestResult(BaseModel):
+    """Result from creating a delegation request."""
+
+    delegation_id: str = Field(..., alias="delegationId")
+    status: str
+    expires_at: str = Field(..., alias="expiresAt")
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+
+class ApprovedDelegation(BaseModel):
+    """Result from checking an approved delegation."""
+
+    delegation_id: str = Field(..., alias="delegationId")
+    approver_email: str = Field(..., alias="approverEmail")
+    approver_role: str = Field(..., alias="approverRole")
+    delegation_token: Optional[str] = Field(None, alias="delegationToken")
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+
+class ToolCall(BaseModel):
     """
-    SDK configuration.
-    
-    Attributes:
-        iap_endpoint: IAP service endpoint URL
-        proxy_endpoints: Mapping of MCP identifiers to proxy URLs
-        user_id: User identifier
-        agent_id: Agent identifier
-        timeout: Request timeout in seconds
-        max_retries: Maximum retry attempts
-        verify_ssl: Whether to verify SSL certificates
+    A single tool call as surfaced by an LLM framework (ADK, LangChain,
+    OpenAI Agents, Vercel AI SDK, etc.). Used by ArmorIQSession to capture
+    a plan without making the caller hand-build the SDK plan shape.
     """
 
+    name: str
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+
+class _McpCredBearer(BaseModel):
+    auth_type: Literal["bearer"] = Field("bearer", alias="authType")
+    token: str
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class _McpCredApiKey(BaseModel):
+    auth_type: Literal["api_key"] = Field("api_key", alias="authType")
+    api_key: str = Field(..., alias="apiKey")
+    header_name: Optional[str] = Field(None, alias="headerName")
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class _McpCredBasic(BaseModel):
+    auth_type: Literal["basic"] = Field("basic", alias="authType")
+    username: str
+    password: str
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class _McpCredNone(BaseModel):
+    auth_type: Literal["none"] = Field("none", alias="authType")
+    model_config = ConfigDict(populate_by_name=True)
+
+
+McpCredential = Union[_McpCredBearer, _McpCredApiKey, _McpCredBasic, _McpCredNone]
+"""
+Credential for an upstream MCP. Forwarded per-call to the proxy via the
+``X-Armoriq-MCP-Auth`` header. The proxy injects the appropriate upstream
+auth header and drops this one before forwarding. Armoriq does not store
+these values.
+"""
+
+McpCredentialMap = Dict[str, McpCredential]
+"""Map of MCP identifier to runtime credential."""
+
+
+class SDKConfig(BaseModel):
+    """SDK configuration."""
+
     iap_endpoint: str = Field(..., description="IAP endpoint URL")
+    proxy_endpoint: Optional[str] = Field(None, description="Default proxy endpoint")
+    backend_endpoint: Optional[str] = Field(None, description="Backend endpoint")
     proxy_endpoints: Dict[str, str] = Field(
         default_factory=dict, description="MCP proxy endpoints"
     )
@@ -204,4 +288,8 @@ class SDKConfig(BaseModel):
     timeout: float = Field(30.0, description="Request timeout in seconds")
     max_retries: int = Field(3, description="Maximum retry attempts")
     verify_ssl: bool = Field(True, description="Verify SSL certificates")
-    api_key: Optional[str] = Field(None, description="Optional API key for authentication")
+    api_key: Optional[str] = Field(None, description="API key for authentication")
+    use_production: bool = Field(True, description="Use production endpoints")
+    mcp_credentials: Optional[Dict[str, Any]] = Field(
+        None, description="Per-MCP runtime credentials"
+    )

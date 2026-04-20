@@ -11,14 +11,14 @@ Available integrations (require their extra to be installed):
 
 from .crewai import ArmorIQCrew
 from .langchain import ArmorIQLangChain
-from .google_adk import ArmorIQGoogleADK
+from .google_adk import ArmorIQADK
 from .openai import ArmorIQOpenAI
 from .anthropic import ArmorIQAnthropic
 
 __all__ = [
     "ArmorIQCrew",
     "ArmorIQLangChain",
-    "ArmorIQGoogleADK",
+    "ArmorIQADK",
     "ArmorIQOpenAI",
     "ArmorIQAnthropic",
 ]

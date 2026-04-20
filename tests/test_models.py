@@ -1,273 +1,310 @@
 """
 Unit tests for ArmorIQ SDK models.
+
+Covers the full model surface at parity with the TS SDK.
 """
 
 import pytest
 from datetime import datetime
 
 from armoriq_sdk.models import (
+    ApprovedDelegation,
+    DelegationRequest,
+    DelegationRequestParams,
+    DelegationRequestResult,
+    DelegationResult,
+    HoldInfo,
     IntentToken,
-    PlanCapture,
+    InvokeOptions,
     MCPInvocation,
     MCPInvocationResult,
-    DelegationRequest,
-    DelegationResult,
+    MCPSemanticMetadata,
+    PlanCapture,
+    PolicyContext,
     SDKConfig,
+    ToolCall,
+    ToolSemanticEntry,
 )
 
 
+def _make_token(offset_secs: float = 3600) -> IntentToken:
+    now = datetime.now().timestamp()
+    return IntentToken(
+        token_id="tok_1",
+        plan_hash="hash_1",
+        signature="sig_1",
+        issued_at=now,
+        expires_at=now + offset_secs,
+        policy={"rules": []},
+        composite_identity="identity_1",
+        raw_token={"plan": {"steps": []}, "token": {}},
+    )
+
+
 class TestIntentToken:
-    """Test IntentToken model."""
-
-    def test_intent_token_creation(self):
-        """Test creating intent token."""
-        now = datetime.now().timestamp()
-        token = IntentToken(
-            token_id="test_123",
-            plan_hash="hash_123",
-            signature="sig_123",
-            issued_at=now,
-            expires_at=now + 3600,
-            policy={"rules": []},
-            composite_identity="identity_123",
-            raw_token={"data": "test"},
-        )
-
-        assert token.token_id == "test_123"
-        assert token.plan_hash == "hash_123"
+    def test_creation(self):
+        token = _make_token()
+        assert token.token_id == "tok_1"
+        assert token.plan_hash == "hash_1"
         assert not token.is_expired
 
-    def test_intent_token_is_expired(self):
-        """Test token expiration check."""
-        now = datetime.now().timestamp()
-        expired_token = IntentToken(
-            token_id="expired",
-            plan_hash="hash",
-            signature="sig",
-            issued_at=now - 7200,
-            expires_at=now - 3600,  # Expired 1h ago
-            policy={},
-            composite_identity="id",
-            raw_token={},
-        )
+    def test_is_expired_when_past(self):
+        token = _make_token(offset_secs=-3600)
+        assert token.is_expired
+        assert token.time_until_expiry < 0
 
-        assert expired_token.is_expired
-        assert expired_token.time_until_expiry < 0
+    def test_time_until_expiry(self):
+        token = _make_token(offset_secs=1800)
+        assert 1790 < token.time_until_expiry < 1810
 
-    def test_intent_token_time_until_expiry(self):
-        """Test time until expiry calculation."""
-        now = datetime.now().timestamp()
-        token = IntentToken(
-            token_id="test",
-            plan_hash="hash",
-            signature="sig",
-            issued_at=now,
-            expires_at=now + 1800,  # 30 minutes
-            policy={},
-            composite_identity="id",
-            raw_token={},
-        )
-
-        time_left = token.time_until_expiry
-        assert 1790 < time_left < 1810  # ~30 minutes
-
-    def test_intent_token_immutable(self):
-        """Test that IntentToken is immutable."""
-        token = IntentToken(
-            token_id="test",
-            plan_hash="hash",
-            signature="sig",
-            issued_at=123.0,
-            expires_at=456.0,
-            policy={},
-            composite_identity="id",
-            raw_token={},
-        )
-
-        with pytest.raises(Exception):  # Pydantic frozen model
+    def test_frozen(self):
+        token = _make_token()
+        with pytest.raises(Exception):
             token.token_id = "modified"
+
+    def test_optional_fields(self):
+        token = _make_token()
+        assert token.jwt_token is None
+        assert token.policy_snapshot is None
+        assert token.client_info is None
 
 
 class TestPlanCapture:
-    """Test PlanCapture model."""
-
-    def test_plan_capture_creation(self):
-        """Test creating plan capture."""
-        plan = PlanCapture(
-            plan={"steps": []},
-            plan_hash="hash_123",
-            merkle_root="merkle_123",
-            ordered_paths=["/step1", "/step2"],
+    def test_creation(self):
+        capture = PlanCapture(
+            plan={"goal": "test", "steps": [{"action": "x"}]},
             llm="gpt-4",
-            prompt="test prompt",
+            prompt="do x",
             metadata={"key": "value"},
         )
+        assert capture.llm == "gpt-4"
+        assert capture.plan["goal"] == "test"
+        assert capture.metadata["key"] == "value"
 
-        assert plan.plan_hash == "hash_123"
-        assert plan.llm == "gpt-4"
-        assert len(plan.ordered_paths) == 2
-        assert plan.metadata["key"] == "value"
-
-    def test_plan_capture_optional_fields(self):
-        """Test plan capture with optional fields."""
-        plan = PlanCapture(
-            plan={"test": "data"},
-            plan_hash="hash",
-            merkle_root="merkle",
-        )
-
-        assert plan.ordered_paths == []
-        assert plan.llm is None
-        assert plan.prompt is None
-        assert plan.metadata == {}
+    def test_optional_fields(self):
+        capture = PlanCapture(plan={"steps": []})
+        assert capture.llm is None
+        assert capture.prompt is None
+        assert capture.metadata == {}
 
 
 class TestMCPInvocation:
-    """Test MCPInvocation model."""
-
-    def test_mcp_invocation_creation(self):
-        """Test creating MCP invocation."""
-        token = IntentToken(
-            token_id="test",
-            plan_hash="hash",
-            signature="sig",
-            issued_at=123.0,
-            expires_at=456.0,
-            policy={},
-            composite_identity="id",
-            raw_token={},
-        )
-
-        invocation = MCPInvocation(
-            mcp="test-mcp",
-            action="test_action",
-            params={"key": "value"},
+    def test_creation(self):
+        token = _make_token()
+        inv = MCPInvocation(
+            mcp="m",
+            action="a",
+            params={"k": "v"},
             intent_token=token,
-            merkle_proof=[{"position": 0, "hash": "sibling"}],
+            merkle_proof=[{"position": 0, "hash": "sib"}],
         )
-
-        assert invocation.mcp == "test-mcp"
-        assert invocation.action == "test_action"
-        assert invocation.params["key"] == "value"
-        assert len(invocation.merkle_proof) == 1
+        assert inv.mcp == "m"
+        assert inv.action == "a"
+        assert inv.params["k"] == "v"
+        assert len(inv.merkle_proof) == 1
 
 
 class TestMCPInvocationResult:
-    """Test MCPInvocationResult model."""
-
-    def test_mcp_invocation_result_creation(self):
-        """Test creating invocation result."""
-        result = MCPInvocationResult(
-            mcp="test-mcp",
-            action="test_action",
-            result={"data": "success"},
-            status="success",
-            execution_time=1.23,
-            verified=True,
-            metadata={"extra": "info"},
+    def test_creation(self):
+        r = MCPInvocationResult(
+            mcp="m",
+            action="a",
+            result={"data": "ok"},
+            execution_time=1.5,
         )
+        assert r.status == "success"
+        assert r.verified is True
+        assert r.execution_time == 1.5
 
-        assert result.mcp == "test-mcp"
-        assert result.status == "success"
-        assert result.execution_time == 1.23
-        assert result.verified is True
-
-    def test_mcp_invocation_result_defaults(self):
-        """Test invocation result with defaults."""
-        result = MCPInvocationResult(
-            mcp="test-mcp",
-            action="test_action",
-        )
-
-        assert result.status == "success"
-        assert result.verified is True
-        assert result.metadata == {}
+    def test_defaults(self):
+        r = MCPInvocationResult(mcp="m", action="a")
+        assert r.status == "success"
+        assert r.metadata == {}
 
 
 class TestDelegationModels:
-    """Test delegation-related models."""
-
-    def test_delegation_request_creation(self):
-        """Test creating delegation request."""
-        token = IntentToken(
-            token_id="test",
-            plan_hash="hash",
-            signature="sig",
-            issued_at=123.0,
-            expires_at=456.0,
-            policy={},
-            composite_identity="id",
-            raw_token={},
-        )
-
-        request = DelegationRequest(
-            target_agent="agent_123",
-            subtask={"action": "test"},
+    def test_delegation_request(self):
+        token = _make_token()
+        req = DelegationRequest(
+            target_agent="agent_x",
+            subtask={"action": "y"},
             intent_token=token,
-            trust_policy={"policy": "strict"},
+            delegate_public_key="abcd",
         )
+        assert req.target_agent == "agent_x"
+        assert req.validity_seconds == 300.0
 
-        assert request.target_agent == "agent_123"
-        assert request.subtask["action"] == "test"
-
-    def test_delegation_result_creation(self):
-        """Test creating delegation result."""
-        token = IntentToken(
-            token_id="test",
-            plan_hash="hash",
-            signature="sig",
-            issued_at=123.0,
-            expires_at=456.0,
-            policy={},
-            composite_identity="id",
-            raw_token={},
-        )
-
+    def test_delegation_result(self):
+        token = _make_token()
         result = DelegationResult(
-            target_agent="agent_123",
-            new_token=token,
-            trust_delta={"type": "delegation"},
+            delegation_id="d_1",
+            delegated_token=token,
+            delegate_public_key="abcd",
+            expires_at=token.expires_at,
             status="delegated",
         )
-
-        assert result.target_agent == "agent_123"
+        assert result.delegation_id == "d_1"
         assert result.status == "delegated"
-        assert isinstance(result.new_token, IntentToken)
+        assert result.new_token is token
+
+    def test_delegation_request_params_aliases(self):
+        params = DelegationRequestParams(
+            tool="send_payment",
+            action="execute",
+            requester_email="user@co.com",
+            amount=100.5,
+            domain="stripe",
+            plan_id="p_1",
+        )
+        dumped = params.model_dump(by_alias=True, exclude_none=True)
+        assert dumped["requesterEmail"] == "user@co.com"
+        assert dumped["planId"] == "p_1"
+        assert "requesterRole" not in dumped
+
+    def test_delegation_request_result(self):
+        r = DelegationRequestResult.model_validate(
+            {"delegationId": "d_1", "status": "pending", "expiresAt": "2026-04-18T00:00:00Z"}
+        )
+        assert r.delegation_id == "d_1"
+        assert r.expires_at == "2026-04-18T00:00:00Z"
+
+    def test_approved_delegation(self):
+        r = ApprovedDelegation.model_validate(
+            {
+                "delegationId": "d_1",
+                "approverEmail": "boss@co.com",
+                "approverRole": "cfo",
+                "delegationToken": "tok_xyz",
+            }
+        )
+        assert r.delegation_id == "d_1"
+        assert r.approver_role == "cfo"
+
+
+class TestSemanticMetadata:
+    def test_tool_semantic_entry(self):
+        entry = ToolSemanticEntry.model_validate(
+            {
+                "isFinancial": True,
+                "amountFields": ["amount", "total"],
+                "amountUnit": "cents",
+                "currency": "USD",
+                "transactionType": "payment",
+                "recipientField": "destination",
+            }
+        )
+        assert entry.is_financial is True
+        assert entry.amount_fields == ["amount", "total"]
+        assert entry.amount_unit == "cents"
+
+    def test_mcp_semantic_metadata(self):
+        meta = MCPSemanticMetadata.model_validate(
+            {
+                "mcpId": "mcp_1",
+                "name": "Stripe",
+                "toolMetadata": {
+                    "charge": {"isFinancial": True, "amountFields": ["amount"]}
+                },
+                "roleMapping": {"admin": "owner"},
+            }
+        )
+        assert meta.name == "Stripe"
+        assert meta.tool_metadata["charge"].is_financial is True
+        assert meta.role_mapping["admin"] == "owner"
+
+    def test_empty_metadata(self):
+        meta = MCPSemanticMetadata()
+        assert meta.mcp_id == ""
+        assert meta.tool_metadata == {}
+
+
+class TestPolicyContext:
+    def test_defaults(self):
+        ctx = PolicyContext()
+        assert ctx.is_financial is False
+        assert ctx.amount is None
+
+    def test_financial(self):
+        ctx = PolicyContext(
+            is_financial=True, transaction_type="payment", amount=50.0, recipient_id="r_1"
+        )
+        assert ctx.amount == 50.0
+
+
+class TestHoldInfo:
+    def test_required(self):
+        h = HoldInfo(reason="over threshold", tool="charge", mcp="stripe")
+        assert h.reason == "over threshold"
+        assert h.amount is None
+
+    def test_full(self):
+        h = HoldInfo(
+            delegation_id="d_1",
+            reason="r",
+            amount=100.0,
+            approval_threshold=500.0,
+            tool="t",
+            mcp="m",
+        )
+        assert h.delegation_id == "d_1"
+        assert h.amount == 100.0
+
+
+class TestInvokeOptions:
+    def test_defaults(self):
+        opts = InvokeOptions()
+        assert opts.wait_for_approval is None
+        assert opts.on_hold is None
+        assert opts.user_email is None
+
+    def test_callback(self):
+        captured = []
+
+        def cb(info: HoldInfo) -> None:
+            captured.append(info)
+
+        opts = InvokeOptions(
+            wait_for_approval=True,
+            user_email="u@co.com",
+            on_hold=cb,
+            delegation_timeout_ms=60000,
+        )
+        opts.on_hold(HoldInfo(reason="x", tool="t", mcp="m"))
+        assert len(captured) == 1
+        assert opts.delegation_timeout_ms == 60000
+
+
+class TestToolCall:
+    def test_creation(self):
+        tc = ToolCall(name="Stripe__charge", args={"amount": 100})
+        assert tc.name == "Stripe__charge"
+        assert tc.args["amount"] == 100
+
+    def test_default_args(self):
+        tc = ToolCall(name="x")
+        assert tc.args == {}
 
 
 class TestSDKConfig:
-    """Test SDK configuration model."""
-
-    def test_sdk_config_creation(self):
-        """Test creating SDK config."""
-        config = SDKConfig(
+    def test_creation(self):
+        cfg = SDKConfig(
             iap_endpoint="http://iap.example.com",
-            proxy_endpoints={"mcp1": "http://proxy1.example.com"},
-            user_id="user_123",
-            agent_id="agent_123",
-            context_id="ctx_123",
+            proxy_endpoints={"m1": "http://p1.example.com"},
+            user_id="u_1",
+            agent_id="a_1",
             timeout=60.0,
             max_retries=5,
             verify_ssl=False,
-            api_key="secret_key",
+            api_key="ak_test_xxx",
+            use_production=False,
         )
+        assert cfg.timeout == 60.0
+        assert cfg.use_production is False
 
-        assert config.iap_endpoint == "http://iap.example.com"
-        assert config.user_id == "user_123"
-        assert config.timeout == 60.0
-        assert config.verify_ssl is False
-
-    def test_sdk_config_defaults(self):
-        """Test SDK config with defaults."""
-        config = SDKConfig(
-            iap_endpoint="http://iap.example.com",
-            user_id="user_123",
-            agent_id="agent_123",
-        )
-
-        assert config.proxy_endpoints == {}
-        assert config.context_id is None
-        assert config.timeout == 30.0
-        assert config.max_retries == 3
-        assert config.verify_ssl is True
-        assert config.api_key is None
+    def test_defaults(self):
+        cfg = SDKConfig(iap_endpoint="http://iap", user_id="u", agent_id="a")
+        assert cfg.proxy_endpoints == {}
+        assert cfg.timeout == 30.0
+        assert cfg.max_retries == 3
+        assert cfg.verify_ssl is True
+        assert cfg.use_production is True
