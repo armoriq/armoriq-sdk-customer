@@ -54,7 +54,7 @@ from .models import (
     ToolSemanticEntry,
 )
 
-__version__ = "0.2.12"
+__version__ = "0.3.2"
 VERSION = __version__
 __author__ = "ArmorIQ Team"
 AUTHOR = __author__
