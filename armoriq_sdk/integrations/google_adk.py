@@ -195,23 +195,31 @@ class _ArmorIQADKBundle:
                         "[armoriq] HELD %s user=%s reason=%s — waiting for approval...",
                         tool_name, self.user_email, decision.reason,
                     )
+                    # Matches client.invoke_with_policy: 30-min default, exponential 3s→15s.
                     approved = False
                     final_decision = decision
-                    for attempt in range(20):
-                        await asyncio.sleep(3)
+                    timeout_s = 30 * 60
+                    deadline = asyncio.get_event_loop().time() + timeout_s
+                    poll_interval = 3.0
+                    attempt = 0
+                    while asyncio.get_event_loop().time() < deadline:
+                        await asyncio.sleep(poll_interval)
+                        poll_interval = min(poll_interval * 1.5, 15.0)
+                        attempt += 1
                         retry = await asyncio.to_thread(
                             self._ensure_session().check,
                             tool_name, args or {}, user_email=self.user_email,
                         )
                         final_decision = retry
                         if retry.allowed:
-                            logger.info("[armoriq] APPROVED %s after %ds", tool_name, (attempt + 1) * 3)
+                            logger.info("[armoriq] APPROVED %s after ~%ds (attempt %d)",
+                                        tool_name, int(timeout_s - (deadline - asyncio.get_event_loop().time())), attempt)
                             approved = True
                             break
                         if retry.action != "hold":
                             logger.info("[armoriq] REJECTED %s action=%s", tool_name, retry.action)
                             break
-                        logger.debug("[armoriq] still waiting for approval... (%d/%d)", attempt + 1, 20)
+                        logger.debug("[armoriq] still waiting for approval... (attempt %d)", attempt)
 
                     if approved:
                         return None
