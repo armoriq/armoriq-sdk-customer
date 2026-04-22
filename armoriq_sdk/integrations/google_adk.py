@@ -28,12 +28,13 @@ cached. `for_user(email)` resolves + caches user context for 5 min.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional, Tuple
 
 from ..client import ArmorIQClient, ArmorIQUserScope
 from ..models import ToolCall
-from ..session import ArmorIQSession, SessionMode, SessionOptions
+from ..session import ArmorIQSession, ReportOptions, SessionMode, SessionOptions
 
 logger = logging.getLogger("armoriq.integrations.google_adk")
 
@@ -136,6 +137,7 @@ class _ArmorIQADKBundle:
         self.session: Optional[ArmorIQSession] = None
         self._plan_minted = False
         self._blocked_tools: set = set()
+        self._blocked_actions: dict = {}
         self._agent = None
         self._saved: Dict[str, Any] = {}
 
@@ -182,34 +184,58 @@ class _ArmorIQADKBundle:
                 tool_name, args or {}, user_email=self.user_email
             )
             if not decision.allowed:
-                self._blocked_tools.add(tool_name)
-                logger.info(
-                    "[armoriq] BLOCKED %s user=%s action=%s reason=%s",
-                    tool_name, self.user_email, decision.action, decision.reason,
-                )
                 policy = (
                     f" (policy: {decision.matched_policy})"
                     if decision.matched_policy
                     else ""
                 )
-                if decision.action == "hold" and decision.delegation_id:
-                    user_msg = (
-                        f"This action requires approval{policy}. "
-                        f"An approval request has been sent (id: {decision.delegation_id}). "
-                        f"Re-run once approved. Reason: {decision.reason or 'policy-hold'}."
+
+                if decision.action == "hold":
+                    logger.info(
+                        "[armoriq] HELD %s user=%s reason=%s — waiting for approval...",
+                        tool_name, self.user_email, decision.reason,
                     )
-                elif decision.action == "hold":
-                    user_msg = (
-                        f"This action requires approval before it can run{policy}. "
-                        f"Reason: {decision.reason or 'policy-hold'}."
-                    )
-                else:
-                    user_msg = (
-                        f"This action is not permitted by your organization's policy{policy}. "
-                        f"Reason: {decision.reason or 'policy-blocked'}."
-                    )
+                    # Poll for approval (check every 3s, up to 60s)
+                    approved = False
+                    for attempt in range(20):
+                        await asyncio.sleep(3)
+                        retry = self._ensure_session().check(
+                            tool_name, args or {}, user_email=self.user_email
+                        )
+                        if retry.allowed:
+                            logger.info("[armoriq] APPROVED %s after %ds", tool_name, (attempt + 1) * 3)
+                            approved = True
+                            break
+                        if retry.action != "hold":
+                            break
+                        logger.debug("[armoriq] still waiting for approval... (%d/%d)", attempt + 1, 20)
+
+                    if approved:
+                        return None  # let ADK call the tool
+
+                    self._blocked_tools.add(tool_name)
+                    self._blocked_actions[tool_name] = "hold"
+                    return {
+                        "error": f"Approval timed out{policy}. Reason: {decision.reason or 'policy-hold'}.",
+                        "armoriq_enforcement": {
+                            "blocked": True,
+                            "action": "hold",
+                            "reason": decision.reason,
+                            "matched_policy": decision.matched_policy,
+                            "tool": tool_name,
+                            "delegation_id": decision.delegation_id,
+                        },
+                    }
+
+                # Hard block
+                self._blocked_tools.add(tool_name)
+                self._blocked_actions[tool_name] = decision.action
+                logger.info(
+                    "[armoriq] BLOCKED %s user=%s action=%s reason=%s",
+                    tool_name, self.user_email, decision.action, decision.reason,
+                )
                 return {
-                    "error": user_msg,
+                    "error": f"This action is not permitted by your organization's policy{policy}. Reason: {decision.reason or 'policy-blocked'}.",
                     "armoriq_enforcement": {
                         "blocked": True,
                         "action": decision.action,
@@ -227,6 +253,13 @@ class _ArmorIQADKBundle:
         tool_name = getattr(tool, "name", str(tool))
         try:
             if tool_name in self._blocked_tools:
+                action = self._blocked_actions.pop(tool_name, "block")
+                self._blocked_tools.discard(tool_name)
+                if action != "hold":
+                    self._ensure_session().report(
+                        tool_name, args or {}, tool_response,
+                        ReportOptions(status="failed", error_message="Blocked by policy"),
+                    )
                 return None
             self._ensure_session().report(tool_name, args or {}, tool_response)
         except Exception as exc:
