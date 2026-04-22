@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
@@ -703,7 +704,10 @@ class ArmorIQClient:
             "tool": action,
             "params": invoke_params,
             "arguments": invoke_params,
-            "intent_token": intent_token.raw_token,
+            "intent_token": {
+                **(intent_token.raw_token or {}),
+                "policy_validation": intent_token.policy_validation,
+            },
             "merkle_proof": merkle_proof,
             "plan": intent_token.raw_token.get("plan") if intent_token.raw_token else None,
             "_iam_context": iam_context,
@@ -1141,12 +1145,14 @@ class ArmorIQClient:
     ) -> DelegationRequestResult:
         """Create a delegation request on the backend."""
         body = params.model_dump(by_alias=True, exclude_none=True)
+        idempotency_key = f"deleg-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
         response = self.http_client.post(
             f"{self.backend_endpoint}/delegation/request",
             json=body,
             headers={
                 "X-API-Key": self.api_key,
                 "X-User-Email": params.requester_email,
+                "Idempotency-Key": idempotency_key,
             },
         )
         if response.status_code >= 400:
