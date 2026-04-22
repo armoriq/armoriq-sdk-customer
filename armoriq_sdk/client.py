@@ -87,7 +87,7 @@ class ArmorIQClient:
     ARMORCLAW_PROXY_ENDPOINT = "https://proxy.armorclaw.io"
     ARMORCLAW_BACKEND_ENDPOINT = "https://api.armorclaw.io"
 
-    LOCAL_IAP_ENDPOINT = "http://127.0.0.1:8000"
+    LOCAL_IAP_ENDPOINT = "http://127.0.0.1:8080"
     LOCAL_PROXY_ENDPOINT = "http://127.0.0.1:3001"
     LOCAL_BACKEND_ENDPOINT = "http://127.0.0.1:3000"
 
@@ -112,9 +112,6 @@ class ArmorIQClient:
         mcp_credentials: Optional[Mapping[str, Mapping[str, Any]]] = None,
         _skip_api_key_validation: bool = False,
     ):
-        env_mode = os.getenv("ARMORIQ_ENV", "production").lower()
-        use_prod = use_production and (env_mode == "production")
-
         resolved_api_key = api_key or os.getenv("ARMORIQ_API_KEY") or ""
         if not resolved_api_key:
             try:
@@ -126,19 +123,26 @@ class ArmorIQClient:
                 pass
         is_armorclaw = resolved_api_key.startswith("ak_claw_")
 
-        # For non-armorclaw keys, let _build_env pick staging vs production
-        # based on the SDK branch (and ARMORIQ_ENV env var override).
+        # ARMORIQ_ENV drives the non-armorclaw endpoint pick (local/staging/prod).
+        # Armorclaw keys ignore ARMORIQ_ENV and switch on `use_production` only,
+        # because armorclaw has no branch-baked staging row.
         from ._build_env import resolve as _env_resolve
 
         def _env_default(kind: str, local_default: str) -> str:
-            if not use_prod:
-                return local_default
             if is_armorclaw:
+                if use_production:
+                    return {
+                        "iap": self.ARMORCLAW_IAP_ENDPOINT,
+                        "proxy": self.ARMORCLAW_PROXY_ENDPOINT,
+                        "backend": self.ARMORCLAW_BACKEND_ENDPOINT,
+                    }[kind]
                 return {
-                    "iap": self.ARMORCLAW_IAP_ENDPOINT,
-                    "proxy": self.ARMORCLAW_PROXY_ENDPOINT,
-                    "backend": self.ARMORCLAW_BACKEND_ENDPOINT,
+                    "iap": self.LOCAL_ARMORCLAW_IAP_ENDPOINT,
+                    "proxy": self.LOCAL_ARMORCLAW_PROXY_ENDPOINT,
+                    "backend": self.LOCAL_ARMORCLAW_BACKEND_ENDPOINT,
                 }[kind]
+            if not use_production:
+                return local_default
             return _env_resolve(kind)
 
         # Endpoint resolution: param > env > branch-aware default
@@ -216,7 +220,7 @@ class ArmorIQClient:
         logger.info(
             "ArmorIQ SDK initialized: mode=%s, user=%s, agent=%s, iap=%s, "
             "proxy=%s, backend=%s, api_key=%s",
-            "production" if use_prod else "development",
+            os.getenv("ARMORIQ_ENV", "production" if use_production else "local").lower(),
             self.user_id,
             self.agent_id,
             self.iap_endpoint,

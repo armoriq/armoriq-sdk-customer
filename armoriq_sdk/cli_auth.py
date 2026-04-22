@@ -112,6 +112,8 @@ def cmd_login(args: argparse.Namespace) -> int:
         or _resolve_env("backend")
     ).rstrip("/")
 
+    requested_org = (getattr(args, "org", None) or "").strip()
+
     print("")
     print("  \033[1m\033[36m┃ ArmorIQ Login\033[0m")
     print("")
@@ -141,6 +143,8 @@ def cmd_login(args: argparse.Namespace) -> int:
 
     sep = "&" if "?" in verification_complete else "?"
     browser_url = f"{verification_complete}{sep}callback={quote(callback_url, safe='')}"
+    if requested_org:
+        browser_url += f"&org={quote(requested_org, safe='')}"
 
     print("  Opening browser...\n")
     try:

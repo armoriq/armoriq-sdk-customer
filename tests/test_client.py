@@ -21,6 +21,7 @@ from armoriq_sdk import (
     PolicyBlockedException,
     TokenExpiredException,
 )
+from armoriq_sdk._build_env import resolve as _resolve_endpoint
 from armoriq_sdk.models import (
     ApprovedDelegation,
     DelegationRequestParams,
@@ -121,9 +122,13 @@ class TestClientInitialization:
             use_production=True,
             _skip_api_key_validation=True,
         )
-        assert c.iap_endpoint == ArmorIQClient.DEFAULT_IAP_ENDPOINT
-        assert c.default_proxy_endpoint == ArmorIQClient.DEFAULT_PROXY_ENDPOINT
-        assert c.backend_endpoint == ArmorIQClient.DEFAULT_BACKEND_ENDPOINT
+        # Compare against _build_env.resolve() rather than DEFAULT_* constants:
+        # DEFAULT_* are hardcoded prod strings on the class, but the runtime
+        # default tracks the branch-baked ARMORIQ_ENV (prod on main, staging
+        # on dev, local if the env var is set).
+        assert c.iap_endpoint == _resolve_endpoint("iap")
+        assert c.default_proxy_endpoint == _resolve_endpoint("proxy")
+        assert c.backend_endpoint == _resolve_endpoint("backend")
 
     def test_uses_local_endpoints_when_not_production(self):
         c = ArmorIQClient(
