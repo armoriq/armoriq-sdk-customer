@@ -195,35 +195,52 @@ class _ArmorIQADKBundle:
                         "[armoriq] HELD %s user=%s reason=%s — waiting for approval...",
                         tool_name, self.user_email, decision.reason,
                     )
-                    # Poll for approval (check every 3s, up to 60s)
                     approved = False
+                    final_decision = decision
                     for attempt in range(20):
                         await asyncio.sleep(3)
-                        retry = self._ensure_session().check(
-                            tool_name, args or {}, user_email=self.user_email
+                        retry = await asyncio.to_thread(
+                            self._ensure_session().check,
+                            tool_name, args or {}, user_email=self.user_email,
                         )
+                        final_decision = retry
                         if retry.allowed:
                             logger.info("[armoriq] APPROVED %s after %ds", tool_name, (attempt + 1) * 3)
                             approved = True
                             break
                         if retry.action != "hold":
+                            logger.info("[armoriq] REJECTED %s action=%s", tool_name, retry.action)
                             break
                         logger.debug("[armoriq] still waiting for approval... (%d/%d)", attempt + 1, 20)
 
                     if approved:
-                        return None  # let ADK call the tool
+                        return None
 
+                    final_policy = (
+                        f" (policy: {final_decision.matched_policy})"
+                        if final_decision.matched_policy else ""
+                    )
                     self._blocked_tools.add(tool_name)
-                    self._blocked_actions[tool_name] = "hold"
+                    self._blocked_actions[tool_name] = final_decision.action
+                    if final_decision.action == "hold":
+                        return {
+                            "error": f"Approval timed out{final_policy}. Reason: {final_decision.reason or 'policy-hold'}.",
+                            "armoriq_enforcement": {
+                                "blocked": True, "action": "hold",
+                                "reason": final_decision.reason,
+                                "matched_policy": final_decision.matched_policy,
+                                "tool": tool_name,
+                                "delegation_id": final_decision.delegation_id,
+                            },
+                        }
                     return {
-                        "error": f"Approval timed out{policy}. Reason: {decision.reason or 'policy-hold'}.",
+                        "error": f"This action is not permitted{final_policy}. Reason: {final_decision.reason or 'policy-blocked'}.",
                         "armoriq_enforcement": {
-                            "blocked": True,
-                            "action": "hold",
-                            "reason": decision.reason,
-                            "matched_policy": decision.matched_policy,
+                            "blocked": True, "action": final_decision.action,
+                            "reason": final_decision.reason,
+                            "matched_policy": final_decision.matched_policy,
                             "tool": tool_name,
-                            "delegation_id": decision.delegation_id,
+                            "delegation_id": final_decision.delegation_id,
                         },
                     }
 
