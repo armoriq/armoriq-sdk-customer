@@ -221,8 +221,8 @@ wheels = [
 ]
 
 [[package]]
-name = "armoriq-sdk-dev"
-version = "0.3.1"
+name = "armoriq-sdk"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
