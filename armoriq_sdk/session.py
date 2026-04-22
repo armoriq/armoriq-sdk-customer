@@ -389,12 +389,14 @@ class ArmorIQSession:
                     matched_policy=data.get("matched_policy"),
                 )
             data = response.json() or {}
+            raw_policy = data.get("matched_policy") or data.get("matchedPolicy")
+            policy_name = raw_policy.get("name") if isinstance(raw_policy, dict) else raw_policy
             return EnforceResult(
                 allowed=data.get("allowed") is not False,
                 action=data.get("enforcementAction") or data.get("action") or ("block" if data.get("allowed") is False else "allow"),
                 reason=data.get("reason"),
                 delegation_id=data.get("delegation_id"),
-                matched_policy=data.get("matched_policy") or data.get("matchedPolicy"),
+                matched_policy=policy_name,
             )
         except httpx.HTTPError as e:
             logger.warning("enforce() failed: %s. Allowing tool call.", e)
