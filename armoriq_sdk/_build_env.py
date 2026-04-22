@@ -8,12 +8,13 @@ so the release owner consciously flips the default before publishing prod.
   main branch  →  ARMORIQ_ENV = "production"  (prod URLs; published as stable)
   dev  branch  →  ARMORIQ_ENV = "staging"     (staging URLs; published as -dev)
 
-The baked constant is the ONLY source of truth for which environment's
-URLs to use — no runtime env-var override. To point the SDK at staging,
-install the dev build; to override a specific endpoint for testing,
-pass `backend_endpoint=...` to the ArmorIQClient constructor or set
-BACKEND_ENDPOINT / IAP_ENDPOINT / PROXY_ENDPOINT env vars.
+The baked constant is the branch-baked default. Set ARMORIQ_ENV=local (or
+staging/production) in your shell to override at runtime — matches the TS
+SDK's behavior. Per-endpoint env vars (BACKEND_ENDPOINT / IAP_ENDPOINT /
+PROXY_ENDPOINT) still win over both.
 """
+
+import os as _os
 
 ARMORIQ_ENV: str = "staging"
 
@@ -27,6 +28,8 @@ ARMORIQ_ENV: str = "staging"
 #     staging-api.armoriq.ai          → conmap-auto-staging            (us-central1)
 #     iap-staging.armoriq.ai          → csrg-execution-service-staging (us-central1)
 #     cloud-run-proxy.armoriq.io      → armoriq-proxy-dev              (europe-west1)
+#   local: matches startup.md canonical ports — conmap-auto :3000,
+#     armoriq-proxy-server :3001, csrg-iap :8080.
 ENDPOINTS = {
     "production": {
         "backend": "https://api.armoriq.ai",
@@ -38,8 +41,20 @@ ENDPOINTS = {
         "proxy": "https://cloud-run-proxy.armoriq.io",
         "iap": "https://iap-staging.armoriq.ai",
     },
+    "local": {
+        "backend": "http://127.0.0.1:3000",
+        "proxy": "http://127.0.0.1:3001",
+        "iap": "http://127.0.0.1:8080",
+    },
 }
 
 
+def _active_env() -> str:
+    override = (_os.getenv("ARMORIQ_ENV") or "").strip().lower()
+    if override in ENDPOINTS:
+        return override
+    return ARMORIQ_ENV
+
+
 def resolve(kind: str) -> str:
-    return ENDPOINTS[ARMORIQ_ENV][kind]
+    return ENDPOINTS[_active_env()][kind]

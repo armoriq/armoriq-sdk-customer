@@ -276,7 +276,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     if environment not in {"sandbox", "production"}:
         raise CLIError("Environment must be 'sandbox' or 'production'.")
 
-    proxy_url = "https://customer-proxy.armoriq.ai"
+    proxy_url = _resolve_env_endpoint("proxy")
     try:
         validate_api_key(api_key_input, proxy_url)
         _print(f"{CHECK} Credentials verified")
@@ -415,6 +415,141 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def _backend_base() -> str:
+    explicit = _os.getenv("BACKEND_ENDPOINT") or _os.getenv("ARMORIQ_BACKEND_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    return _resolve_env_endpoint("backend").rstrip("/")
+
+
+def _require_credentials():
+    from .credentials import load_credentials, get_credentials_path
+
+    creds = load_credentials()
+    if not creds:
+        raise CLIError(
+            f"Not logged in ({get_credentials_path()} missing). Run `armoriq login` first."
+        )
+    return creds
+
+
+def cmd_orgs(args: argparse.Namespace) -> int:
+    creds = _require_credentials()
+    url = f"{_backend_base()}/iap/sdk/orgs"
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+            response = client.get(url, headers={"X-API-Key": creds.apiKey})
+    except Exception as exc:
+        raise CLIError(f"Failed to reach {url}: {exc}")
+
+    if response.status_code == 401:
+        raise CLIError("API key rejected (401). Try `armoriq login` again.")
+    if response.status_code >= 400:
+        raise CLIError(f"Failed to list orgs (HTTP {response.status_code}).")
+
+    payload = response.json()
+    orgs = payload.get("data") or []
+    if not orgs:
+        _print("You don't belong to any organizations.")
+        return 0
+
+    name_w = max(len("NAME"), max(len(o.get("name", "")) for o in orgs))
+    role_w = max(len("ROLE"), max(len(o.get("userRole", "")) for o in orgs))
+    header = (
+        f"  {'NAME'.ljust(name_w)}  {'ORG_ID'.ljust(36)}  "
+        f"{'ROLE'.ljust(role_w)}  MEMBERS"
+    )
+    _print(header)
+    _print("  " + "-" * (len(header) - 2))
+    for org in orgs:
+        marker = f"{CHECK} " if org.get("active") else "  "
+        name = (org.get("name") or "").ljust(name_w)
+        org_id = (org.get("orgId") or "").ljust(36)
+        role = (org.get("userRole") or "").ljust(role_w)
+        members = str(org.get("memberCount") or 0)
+        _print(f"{marker}{name}  {org_id}  {role}  {members}")
+    _print("")
+    _print(f"Active org is marked with {CHECK}. Switch with `armoriq switch-org <name-or-id>`.")
+    _append_log("orgs", {"count": len(orgs)})
+    return 0
+
+
+def cmd_switch_org(args: argparse.Namespace) -> int:
+    from .credentials import Credentials, save_credentials
+
+    creds = _require_credentials()
+    target = (args.org or "").strip()
+    if not target:
+        raise CLIError("Target org (id or name) is required.")
+
+    url = f"{_backend_base()}/iap/sdk/switch-org"
+    body = {"org": target}
+    if getattr(args, "key_name", None):
+        body["keyName"] = args.key_name
+
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+            response = client.post(
+                url,
+                json=body,
+                headers={"X-API-Key": creds.apiKey, "Content-Type": "application/json"},
+            )
+    except Exception as exc:
+        raise CLIError(f"Failed to reach {url}: {exc}")
+
+    if response.status_code == 401:
+        raise CLIError("API key rejected (401). Try `armoriq login` again.")
+    if response.status_code == 403:
+        raise CLIError(f"You are not a member of '{target}'.")
+    if response.status_code == 404:
+        raise CLIError(f"No organization named '{target}' (or matching that id).")
+    if response.status_code == 400:
+        detail = ""
+        try:
+            detail = response.json().get("message") or ""
+        except Exception:
+            pass
+        raise CLIError(detail or "Bad request.")
+    if response.status_code >= 400:
+        raise CLIError(f"Switch failed (HTTP {response.status_code}).")
+
+    payload = response.json()
+    new_api_key = payload.get("api_key")
+    new_org_id = payload.get("org_id")
+    new_org_name = payload.get("org_name") or target
+    if not new_api_key or not new_org_id:
+        raise CLIError("Switch response missing api_key or org_id.")
+
+    save_credentials(
+        Credentials(
+            apiKey=new_api_key,
+            email=creds.email,
+            userId=creds.userId,
+            orgId=new_org_id,
+            savedAt=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+
+    # Agent registration (state.json) was org-scoped — invalidate it so the
+    # next step is obvious.
+    state_existed = STATE_FILE.exists()
+    if state_existed:
+        try:
+            STATE_FILE.unlink()
+        except OSError:
+            pass
+
+    _print(f"{CHECK} Switched to {new_org_name} (org_id={new_org_id})")
+    _print(f"{CHECK} New API key saved.")
+    if state_existed:
+        _print("  Previous agent registration cleared. Re-run `armoriq register` in this org.")
+    _append_log(
+        "switch-org",
+        {"org_id": new_org_id, "org_name": new_org_name, "cleared_state": state_existed},
+    )
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     state = _load_state()
     if not state:
@@ -532,6 +667,10 @@ def build_parser() -> argparse.ArgumentParser:
         "login", help="Log in to ArmorIQ via browser (OAuth device-code flow)"
     )
     login_parser.add_argument("--backend", help="Override backend URL")
+    login_parser.add_argument(
+        "--org",
+        help="Pre-select an organization (by id or exact name). Optional; the browser flow still lets you change it.",
+    )
     login_parser.set_defaults(func=cmd_login)
 
     logout_parser = subparsers.add_parser("logout", help="Remove saved credentials")
@@ -541,6 +680,26 @@ def build_parser() -> argparse.ArgumentParser:
         "whoami", help="Show current authentication status"
     )
     whoami_parser.set_defaults(func=cmd_whoami)
+
+    orgs_parser = subparsers.add_parser(
+        "orgs", help="List organizations your account belongs to"
+    )
+    orgs_parser.set_defaults(func=cmd_orgs)
+
+    switch_parser = subparsers.add_parser(
+        "switch-org",
+        help="Switch to a different organization (mints a new API key scoped to it)",
+    )
+    switch_parser.add_argument(
+        "org",
+        help="Target organization — pass the org_id (UUID) or exact organization name.",
+    )
+    switch_parser.add_argument(
+        "--key-name",
+        dest="key_name",
+        help="Optional name for the new API key (default: cli-YYYY-MM-DD).",
+    )
+    switch_parser.set_defaults(func=cmd_switch_org)
 
     return parser
 
