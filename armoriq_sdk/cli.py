@@ -118,6 +118,28 @@ def _prompt_yes_no(question: str, default: bool = False) -> bool:
     return response in {"y", "yes"}
 
 
+def _looks_like_auth_error(error: Optional[str]) -> bool:
+    if not error:
+        return False
+    lower = error.lower()
+    return "401" in error or "403" in error or "unauthorized" in lower or "forbidden" in lower
+
+
+def _prompt_mcp_auth() -> MCPAuthConfig:
+    auth_type = _prompt("Auth type [bearer/api_key]", "bearer").strip().lower()
+    if auth_type not in {"bearer", "api_key"}:
+        raise CLIError("Auth type must be bearer or api_key.")
+    if auth_type == "bearer":
+        token = _prompt("Bearer token (value or $ENV_VAR)").strip()
+        if not token:
+            raise CLIError("Bearer token is required.")
+        return MCPAuthConfig(type="bearer", token=token)
+    key_value = _prompt("API key (value or $ENV_VAR)").strip()
+    if not key_value:
+        raise CLIError("API key is required.")
+    return MCPAuthConfig(type="api_key", api_key=key_value)
+
+
 def _auto_server_id(url: str) -> str:
     parsed = urlparse(url)
     hostname = (parsed.hostname or "server").lower()
@@ -285,22 +307,43 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     mcp_servers: List[MCPServerConfig] = []
     discovered_by_server: Dict[str, List[str]] = {}
-    while _prompt_yes_no("Add an MCP server? (y/n)", default=False):
-        server_url = _prompt("MCP Server URL")
+    while True:
+        prompt_label = (
+            "Add MCP server URL (empty to skip)"
+            if not mcp_servers
+            else "Add another MCP server URL (empty to finish)"
+        )
+        server_url = _prompt(prompt_label).strip()
+        if not server_url:
+            break
+
+        probe_server = MCPServerConfig(
+            id="probe", url=server_url, auth=MCPAuthConfig(type="none")
+        )
+        discovery = discover_mcp_tools(probe_server)
+        auth = MCPAuthConfig(type="none")
+
+        if not discovery.reachable and _looks_like_auth_error(discovery.error):
+            _print(
+                f"  This MCP server requires authentication ({discovery.error})."
+            )
+            auth = _prompt_mcp_auth()
+            probe_server = MCPServerConfig(id="probe", url=server_url, auth=auth)
+            discovery = discover_mcp_tools(probe_server)
+
+        if discovery.reachable:
+            _print(
+                f"{CHECK} Connection verified. {len(discovery.tools)} tools discovered"
+                + (":" if discovery.tools else ".")
+            )
+            if discovery.tools:
+                _print(f"    {', '.join(discovery.tools)}")
+        else:
+            _print(f"  Connection warning: {discovery.error}")
+
         auto_id = _auto_server_id(server_url)
         server_id = _prompt("Server ID", auto_id)
-        auth_type = _prompt("Auth type [none/bearer/api_key]", "none").strip().lower()
-        if auth_type not in {"none", "bearer", "api_key"}:
-            raise CLIError("Auth type must be one of: none, bearer, api_key.")
         description = _prompt("Description", "")
-        if auth_type == "bearer":
-            token = _prompt("Bearer token (value or $ENV_VAR)")
-            auth = MCPAuthConfig(type="bearer", token=token)
-        elif auth_type == "api_key":
-            key_value = _prompt("API key (value or $ENV_VAR)")
-            auth = MCPAuthConfig(type="api_key", api_key=key_value)
-        else:
-            auth = MCPAuthConfig(type="none")
 
         server = MCPServerConfig(
             id=server_id,
@@ -309,18 +352,8 @@ def cmd_init(args: argparse.Namespace) -> int:
             auth=auth,
         )
         mcp_servers.append(server)
-        discovery = discover_mcp_tools(server)
         if discovery.reachable:
             discovered_by_server[server.id] = discovery.tools
-            _print(
-                f"{CHECK} Connection verified. {len(discovery.tools)} tools discovered:"
-            )
-            if discovery.tools:
-                _print(f"    {', '.join(discovery.tools)}")
-            else:
-                _print("    (no tools returned by server)")
-        else:
-            _print(f"Connection warning for {server.id}: {discovery.error}")
         _print("")
 
     allow_refs: List[str] = []
