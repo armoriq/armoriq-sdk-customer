@@ -126,18 +126,22 @@ def _looks_like_auth_error(error: Optional[str]) -> bool:
 
 
 def _prompt_mcp_auth() -> MCPAuthConfig:
-    auth_type = _prompt("Auth type [bearer/api_key]", "bearer").strip().lower()
-    if auth_type not in {"bearer", "api_key"}:
-        raise CLIError("Auth type must be bearer or api_key.")
+    while True:
+        auth_type = _prompt("Auth method — type 'bearer' or 'api_key'", "bearer").strip().lower()
+        if auth_type in {"bearer", "api_key"}:
+            break
+        _print("  Please type 'bearer' or 'api_key' (or press Enter for bearer).")
     if auth_type == "bearer":
-        token = _prompt("Bearer token (value or $ENV_VAR)").strip()
-        if not token:
-            raise CLIError("Bearer token is required.")
-        return MCPAuthConfig(type="bearer", token=token)
-    key_value = _prompt("API key (value or $ENV_VAR)").strip()
-    if not key_value:
-        raise CLIError("API key is required.")
-    return MCPAuthConfig(type="api_key", api_key=key_value)
+        while True:
+            token = _prompt("Bearer token (value or $ENV_VAR)").strip()
+            if token:
+                return MCPAuthConfig(type="bearer", token=token)
+            _print("  Token cannot be empty.")
+    while True:
+        key_value = _prompt("API key (value or $ENV_VAR)").strip()
+        if key_value:
+            return MCPAuthConfig(type="api_key", api_key=key_value)
+        _print("  API key cannot be empty.")
 
 
 def _auto_server_id(url: str) -> str:
@@ -181,37 +185,96 @@ def _extract_tool_names(payload: object) -> List[str]:
     return []
 
 
+def _parse_mcp_body(body: str) -> object:
+    match = re.search(r"data:\s*(\{.*\})", body)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+    return json.loads(body)
+
+
 def discover_mcp_tools(server: MCPServerConfig, timeout: float = 8.0) -> MCPDiscoveryResult:
     try:
-        headers = _resolve_auth_headers(server.auth)
+        auth_headers = _resolve_auth_headers(server.auth)
+    except CLIError as exc:
+        return MCPDiscoveryResult(reachable=False, tools=[], error=str(exc))
+
+    base_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-protocol-version": "2024-11-05",
+    }
+    headers = {**base_headers, **auth_headers}
+
+    init_request = {
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "ArmorIQ-CLI", "version": "1.0.0"},
+        },
+        "id": 1,
+    }
+    tools_request = {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 2}
+
+    url = server.url.rstrip("/")
+    parsed = urlparse(server.url)
+    candidates = [url]
+    if not parsed.path or parsed.path == "/":
+        candidates.extend([f"{url}/mcp", f"{url}/sse"])
+
+    last_error: Optional[str] = None
+
+    try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            rpc_payload = {"jsonrpc": "2.0", "id": "armoriq-cli", "method": "tools/list", "params": {}}
-            candidates = [server.url.rstrip("/"), f"{server.url.rstrip('/')}/mcp"]
             for candidate in candidates:
                 try:
-                    response = client.post(candidate, json=rpc_payload, headers=headers)
-                    if response.status_code >= 400:
-                        continue
-                    tools = _extract_tool_names(response.json())
-                    return MCPDiscoveryResult(reachable=True, tools=tools)
-                except Exception:
+                    init_resp = client.post(candidate, json=init_request, headers=headers)
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
+                if init_resp.status_code >= 400:
+                    last_error = f"HTTP {init_resp.status_code}"
+                    if init_resp.status_code in (401, 403):
+                        break
                     continue
 
-            response = client.get(server.url, headers=headers)
-            if response.status_code >= 400:
-                return MCPDiscoveryResult(
-                    reachable=False,
-                    tools=[],
-                    error=f"HTTP {response.status_code}",
-                )
-            tools = []
-            try:
-                tools = _extract_tool_names(response.json())
-            except Exception:
-                tools = []
-            return MCPDiscoveryResult(reachable=True, tools=tools)
+                session_headers = dict(headers)
+                session_id = init_resp.headers.get("mcp-session-id")
+                if session_id:
+                    session_headers["mcp-session-id"] = session_id
+                _ = init_resp.text
+
+                try:
+                    tools_resp = client.post(candidate, json=tools_request, headers=session_headers)
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
+                if tools_resp.status_code >= 400:
+                    last_error = f"HTTP {tools_resp.status_code}"
+                    continue
+
+                try:
+                    payload = _parse_mcp_body(tools_resp.text)
+                except Exception as exc:
+                    last_error = f"invalid response body: {exc}"
+                    continue
+
+                if isinstance(payload, dict) and payload.get("error"):
+                    err = payload["error"]
+                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    last_error = f"MCP error: {msg}"
+                    continue
+
+                tools = _extract_tool_names(payload)
+                return MCPDiscoveryResult(reachable=True, tools=tools)
     except Exception as exc:
         return MCPDiscoveryResult(reachable=False, tools=[], error=str(exc))
+
+    return MCPDiscoveryResult(reachable=False, tools=[], error=last_error or "unreachable")
 
 
 def validate_api_key(api_key: str, proxy_url: str, timeout: float = 8.0) -> None:
