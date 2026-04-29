@@ -218,6 +218,55 @@ class ArmorIQClient:
             mcp_credentials
         )
 
+    # ─── Retry helpers ─────────────────────────────────────────────────
+    # Apply exponential backoff (1s → 4s capped) on 5xx and network errors.
+    # 4xx responses are passed through unchanged — caller decides how to
+    # treat policy denials, validation errors, etc.
+
+    def _should_retry(self, status_code: Optional[int]) -> bool:
+        if status_code is None:
+            return True  # network error
+        return status_code >= 500
+
+    def _retry_post(
+        self,
+        url: str,
+        *,
+        json: Any = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "httpx.Response":
+        """POST with exponential backoff. Reuses the same Idempotency-Key
+        across retries so the backend can dedupe on its side."""
+        merged_headers = dict(headers or {})
+        if idempotency_key and "Idempotency-Key" not in merged_headers:
+            merged_headers["Idempotency-Key"] = idempotency_key
+
+        attempts = max(1, int(self.max_retries) + 1)
+        last_exc: Optional[Exception] = None
+        last_response: Optional[httpx.Response] = None
+        for i in range(attempts):
+            try:
+                response = self.http_client.post(
+                    url,
+                    json=json,
+                    headers=merged_headers,
+                    timeout=timeout if timeout is not None else self.timeout,
+                )
+                if not self._should_retry(response.status_code):
+                    return response
+                last_response = response
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                last_exc = e
+            if i < attempts - 1:
+                time.sleep(min(1.0 * (2 ** i), 4.0))
+        if last_response is not None:
+            return last_response
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("retry loop exited without a result")
+
         logger.info(
             "ArmorIQ SDK initialized: mode=%s, user=%s, agent=%s, iap=%s, "
             "proxy=%s, backend=%s, api_key=%s",
@@ -541,11 +590,14 @@ class ArmorIQClient:
             payload["user_email"] = self.user_email_override
 
         try:
-            response = self.http_client.post(
+            # Token issuance is idempotent on the backend (planHash-keyed),
+            # so retrying a 5xx with the same Idempotency-Key is safe.
+            response = self._retry_post(
                 f"{self.backend_endpoint}/iap/sdk/token",
                 json=payload,
                 headers={"X-API-Key": self.api_key},
                 timeout=30.0,
+                idempotency_key=secrets.token_hex(16),
             )
 
             if response.status_code >= 400:
@@ -1185,11 +1237,16 @@ class ArmorIQClient:
         return ApprovedDelegation.model_validate(data)
 
     def mark_delegation_executed(self, user_email: str, delegation_id: str) -> None:
-        """Mark a delegation as executed."""
-        self.http_client.post(
+        """Mark a delegation as executed.
+
+        Idempotent on the backend (delegationId-keyed), so a stable
+        Idempotency-Key derived from the delegation_id is safe to retry.
+        """
+        self._retry_post(
             f"{self.backend_endpoint}/delegation/mark-executed",
             json={"delegationId": delegation_id},
             headers={"X-API-Key": self.api_key, "X-User-Email": user_email},
+            idempotency_key=f"mark-exec:{delegation_id}",
         )
 
     def complete_plan(self, plan_id: str) -> None:
@@ -1197,12 +1254,17 @@ class ArmorIQClient:
         self.update_plan_status(plan_id, "completed")
 
     def update_plan_status(self, plan_id: str, status: str) -> None:
-        """Update an intent plan's status."""
+        """Update an intent plan's status.
+
+        Status transitions are idempotent — retrying with the same
+        ``planId:status`` key is safe.
+        """
         try:
-            self.http_client.post(
+            self._retry_post(
                 f"{self.backend_endpoint}/iap/plans/{plan_id}/status",
                 json={"status": status},
                 headers={"X-API-Key": self.api_key},
+                idempotency_key=f"plan-status:{plan_id}:{status}",
             )
             logger.info("Plan %s status updated to %s", plan_id, status)
         except Exception as e:
