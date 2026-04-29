@@ -701,6 +701,151 @@ def cmd_logs(args: argparse.Namespace) -> int:
         return 0
 
 
+# ─── API key management commands ───────────────────────────────────
+# Closes #24. The backend already exposes:
+#   GET  /api-keys                   (JwtAuth — uses the cached login JWT)
+#   POST /api-keys/:id/revoke
+# We list/revoke against those, and `prune` revokes anything expired or
+# unused for >90 days. Plus a soft warning when key count gets high.
+
+KEY_COUNT_WARN_THRESHOLD = 8
+PRUNE_LAST_USED_DAYS = 90
+PRUNE_NEVER_USED_DAYS = 30
+
+
+def _request_keys(creds, method: str, path: str, **kwargs) -> "httpx.Response":
+    url = f"{_backend_base()}{path}"
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+            response = client.request(
+                method,
+                url,
+                headers={"X-API-Key": creds.apiKey, **kwargs.pop("headers", {})},
+                **kwargs,
+            )
+    except Exception as exc:
+        raise CLIError(f"Failed to reach {url}: {exc}")
+    if response.status_code == 401:
+        raise CLIError("API key rejected (401). Try `armoriq login` again.")
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("message") or ""
+        except Exception:
+            detail = ""
+        raise CLIError(f"{path} failed (HTTP {response.status_code}): {detail}".rstrip(": "))
+    return response
+
+
+def _list_keys_payload(creds) -> List[Dict]:
+    response = _request_keys(creds, "GET", "/api-keys")
+    data = response.json()
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        return data["data"]
+    return []
+
+
+def cmd_keys_list(args: argparse.Namespace) -> int:
+    creds = _require_credentials()
+    keys = _list_keys_payload(creds)
+    if not keys:
+        _print("No API keys found for this account.")
+        return 0
+    name_w = max(len("NAME"), max(len(k.get("name") or "") for k in keys))
+    id_w = max(len("ID"), max(len(k.get("id") or "") for k in keys))
+    _print(f"  {'NAME'.ljust(name_w)}  {'ID'.ljust(id_w)}  STATUS    LAST USED")
+    _print("  " + "-" * (name_w + id_w + 30))
+    for k in keys:
+        name = (k.get("name") or "").ljust(name_w)
+        kid = (k.get("id") or "").ljust(id_w)
+        status = (k.get("status") or "unknown").ljust(8)
+        last = k.get("lastUsedAt") or "-"
+        _print(f"  {name}  {kid}  {status}  {last}")
+    _print("")
+    if len(keys) > KEY_COUNT_WARN_THRESHOLD:
+        _print(
+            f"\033[33m!\033[0m You have {len(keys)} API keys. Consider "
+            f"`armoriq keys prune` to revoke unused keys."
+        )
+    _append_log("keys-list", {"count": len(keys)})
+    return 0
+
+
+def cmd_keys_revoke(args: argparse.Namespace) -> int:
+    creds = _require_credentials()
+    key_id = (getattr(args, "key_id", "") or "").strip()
+    if not key_id:
+        raise CLIError("Usage: armoriq keys revoke <id>")
+    _request_keys(creds, "POST", f"/api-keys/{key_id}/revoke", json={})
+    _print(f"{CHECK} Revoked key {key_id}.")
+    _append_log("keys-revoke", {"id": key_id})
+    return 0
+
+
+def cmd_keys_prune(args: argparse.Namespace) -> int:
+    creds = _require_credentials()
+    keys = _list_keys_payload(creds)
+    now = datetime.now(timezone.utc)
+
+    def _is_candidate(k: Dict) -> bool:
+        status = (k.get("status") or "").lower()
+        if status == "revoked":
+            return False
+        if k.get("apiKey") and k.get("apiKey") == creds.apiKey:
+            return False  # never prune the key we're authed with
+        expires_at = k.get("expiresAt")
+        if expires_at:
+            try:
+                if datetime.fromisoformat(expires_at.replace("Z", "+00:00")) < now:
+                    return True
+            except Exception:
+                pass
+        last_used_at = k.get("lastUsedAt")
+        if last_used_at:
+            try:
+                age_days = (now - datetime.fromisoformat(last_used_at.replace("Z", "+00:00"))).days
+                if age_days > PRUNE_LAST_USED_DAYS:
+                    return True
+            except Exception:
+                pass
+            return False
+        created_at = k.get("createdAt")
+        if created_at:
+            try:
+                age_days = (now - datetime.fromisoformat(created_at.replace("Z", "+00:00"))).days
+                if age_days > PRUNE_NEVER_USED_DAYS:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    candidates = [k for k in keys if _is_candidate(k)]
+    if not candidates:
+        _print("Nothing to prune — all keys are either active, recent, or already revoked.")
+        return 0
+
+    _print(f"Found {len(candidates)} prune candidate(s):")
+    for k in candidates:
+        _print(f"  {k.get('id')} {k.get('name') or ''} (last used {k.get('lastUsedAt') or 'never'})")
+
+    if not args.yes:
+        _print("")
+        _print("Re-run with --yes to actually revoke these.")
+        return 0
+
+    revoked = 0
+    for k in candidates:
+        try:
+            _request_keys(creds, "POST", f"/api-keys/{k['id']}/revoke", json={})
+            _print(f"{CHECK} Revoked {k['id']}")
+            revoked += 1
+        except CLIError as exc:
+            _print(f"\033[31m✘\033[0m Failed to revoke {k['id']}: {exc}")
+    _append_log("keys-prune", {"revoked": revoked, "candidates": len(candidates)})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="armoriq",
@@ -796,6 +941,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional name for the new API key (default: cli-YYYY-MM-DD).",
     )
     switch_parser.set_defaults(func=cmd_switch_org)
+
+    keys_parser = subparsers.add_parser(
+        "keys",
+        help="Manage API keys (list, revoke, prune unused).",
+    )
+    keys_sub = keys_parser.add_subparsers(dest="keys_command", required=True)
+
+    keys_list_parser = keys_sub.add_parser("list", help="List API keys for this account.")
+    keys_list_parser.set_defaults(func=cmd_keys_list)
+
+    keys_revoke_parser = keys_sub.add_parser(
+        "revoke",
+        help="Revoke a single API key by id.",
+    )
+    keys_revoke_parser.add_argument("key_id", help="The API key id (not the secret value).")
+    keys_revoke_parser.set_defaults(func=cmd_keys_revoke)
+
+    keys_prune_parser = keys_sub.add_parser(
+        "prune",
+        help="Revoke API keys that are expired or haven't been used in >90 days.",
+    )
+    keys_prune_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt and revoke immediately.",
+    )
+    keys_prune_parser.set_defaults(func=cmd_keys_prune)
 
     return parser
 
