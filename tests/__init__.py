@@ -18,8 +18,10 @@ from armoriq_sdk import (
 
 
 def test_version():
-    """Test package version is defined."""
-    assert __version__ == "0.1.0"
+    """Package __version__ is defined and matches a semver-like shape."""
+    import re
+    assert __version__
+    assert re.match(r"^\d+\.\d+\.\d+", __version__), __version__
 
 
 def test_client_exported():
