@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SDK_VERSION = "0.2.12"
+SDK_VERSION = "0.3.5"
 
 
 class _EnforcementResponse(Exception):
