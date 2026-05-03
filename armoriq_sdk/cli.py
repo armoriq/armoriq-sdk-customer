@@ -912,6 +912,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--org",
         help="Pre-select an organization (by id or exact name). Optional; the browser flow still lets you change it.",
     )
+    login_parser.add_argument(
+        "--product",
+        help="Identify the calling product (e.g. armorclaude, armorcodex). Used by the browser approval page for product-aware branding. Falls back to ARMORIQ_PRODUCT env var.",
+    )
     login_parser.set_defaults(func=cmd_login)
 
     logout_parser = subparsers.add_parser("logout", help="Remove saved credentials")
