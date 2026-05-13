@@ -113,6 +113,10 @@ def cmd_login(args: argparse.Namespace) -> int:
     ).rstrip("/")
 
     requested_org = (getattr(args, "org", None) or "").strip()
+    requested_product = (
+        (getattr(args, "product", None) or "").strip()
+        or (os.getenv("ARMORIQ_PRODUCT") or "").strip()
+    )
 
     print("")
     print("  \033[1m\033[36m┃ ArmorIQ Login\033[0m")
@@ -122,10 +126,14 @@ def cmd_login(args: argparse.Namespace) -> int:
     callback_url = f"http://localhost:{port}/callback"
     result_q, srv = _start_callback_server(port)
 
+    code_body = {"callback_url": callback_url}
+    if requested_product:
+        code_body["product"] = requested_product
+
     try:
         r = httpx.post(
             f"{backend}/auth/device/code",
-            json={"callback_url": callback_url},
+            json=code_body,
             timeout=10.0,
         )
         r.raise_for_status()
@@ -145,6 +153,8 @@ def cmd_login(args: argparse.Namespace) -> int:
     browser_url = f"{verification_complete}{sep}callback={quote(callback_url, safe='')}"
     if requested_org:
         browser_url += f"&org={quote(requested_org, safe='')}"
+    if requested_product:
+        browser_url += f"&product={quote(requested_product, safe='')}"
 
     print("  Opening browser...\n")
     try:
