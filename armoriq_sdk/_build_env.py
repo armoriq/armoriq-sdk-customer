@@ -16,7 +16,7 @@ PROXY_ENDPOINT) still win over both.
 
 import os as _os
 
-ARMORIQ_ENV: str = "staging"
+ARMORIQ_ENV: str = "production"
 
 # Endpoint table — keep in sync with GCP Cloud Run domain mappings
 # (verified via `gcloud beta run domain-mappings describe --domain=...`).
