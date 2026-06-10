@@ -218,6 +218,9 @@ class ArmorIQClient:
             mcp_credentials
         )
 
+    def _set_agent_id(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+
     # ─── Retry helpers ─────────────────────────────────────────────────
     # Apply exponential backoff (1s → 4s capped) on 5xx and network errors.
     # 4xx responses are passed through unchanged — caller decides how to
