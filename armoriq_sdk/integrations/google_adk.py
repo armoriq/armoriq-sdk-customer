@@ -57,6 +57,7 @@ class ArmorIQADK:
         validity_seconds: int = 300,
         mode: SessionMode = "sdk",
         llm: str = "agent",
+        agent_name: Optional[str] = None,
     ) -> None:
         self.client = ArmorIQClient(
             api_key=api_key,
@@ -65,6 +66,7 @@ class ArmorIQADK:
             proxy_endpoint=proxy_endpoint or backend_endpoint,
             use_production=use_production,
             _skip_api_key_validation=True,
+            agent_id=agent_name,
         )
         self.default_mcp_name = default_mcp_name
         self._custom_parser = tool_name_parser
@@ -72,10 +74,17 @@ class ArmorIQADK:
         self.mode: SessionMode = mode
         self.llm = llm
         self._bootstrap: Optional[Dict[str, Any]] = None
+        self._explicit_agent_name = agent_name
 
     def bootstrap(self) -> Dict[str, Any]:
         if self._bootstrap is None:
             self._bootstrap = self.client.bootstrap()
+            if not self._explicit_agent_name:
+                agents = self._bootstrap.get("agents") or []
+                if len(agents) == 1:
+                    resolved = agents[0].get("name")
+                    if resolved:
+                        self.client._set_agent_id(resolved)
             logger.info(
                 "[armoriq] bootstrap: org=%s mcps=%s toolMap=%d",
                 self._bootstrap["org"]["name"],
