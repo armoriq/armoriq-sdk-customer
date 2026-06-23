@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 import httpx
 
 from .config import load_armoriq_config
+from .crypto_verify import verify_intent_token_signature
 from .exceptions import (
     ConfigurationException,
     DelegationException,
@@ -218,6 +219,19 @@ class ArmorIQClient:
             mcp_credentials
         )
 
+        logger.info(
+            "ArmorIQ SDK initialized: mode=%s, user=%s, agent=%s, iap=%s, proxy=%s, backend=%s",
+            os.getenv("ARMORIQ_ENV", "production" if use_production else "local").lower(),
+            self.user_id,
+            self.agent_id,
+            self.iap_endpoint,
+            self.default_proxy_endpoint,
+            self.backend_endpoint,
+        )
+
+        if not _skip_api_key_validation:
+            self._validate_api_key()
+
     # ─── Retry helpers ─────────────────────────────────────────────────
     # Apply exponential backoff (1s → 4s capped) on 5xx and network errors.
     # 4xx responses are passed through unchanged — caller decides how to
@@ -266,21 +280,6 @@ class ArmorIQClient:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("retry loop exited without a result")
-
-        logger.info(
-            "ArmorIQ SDK initialized: mode=%s, user=%s, agent=%s, iap=%s, "
-            "proxy=%s, backend=%s, api_key=%s",
-            os.getenv("ARMORIQ_ENV", "production" if use_production else "local").lower(),
-            self.user_id,
-            self.agent_id,
-            self.iap_endpoint,
-            self.default_proxy_endpoint,
-            self.backend_endpoint,
-            "***" + self.api_key[-8:],
-        )
-
-        if not _skip_api_key_validation:
-            self._validate_api_key()
 
     @property
     def proxy_endpoint(self) -> str:
@@ -989,9 +988,12 @@ class ArmorIQClient:
         if subtask:
             payload["subtask"] = subtask
 
+        # NOTE: delegate() is legacy. Prefer delegate_subtree() for subtree-bounded
+        # delegation. The /delegation/create route was removed; the live delegation
+        # endpoint is /iap/trust/delegate on the backend.
         try:
             response = self.http_client.post(
-                f"{self.iap_endpoint}/delegation/create",
+                f"{self.backend_endpoint}/iap/trust/delegate",
                 json=payload,
                 timeout=10.0,
             )
@@ -1050,19 +1052,40 @@ class ArmorIQClient:
             raise DelegationException(f"Delegation failed: {e}", target_agent=target_agent)
 
     def verify_token(self, intent_token: IntentToken) -> bool:
-        """Local-only token validation (expiry + required-field checks)."""
+        """Verify an intent token: checks expiry AND cryptographically verifies
+        the Ed25519 signature over the canonical signed payload (which binds
+        plan_hash). Any tampering with the signed fields - including plan_hash -
+        makes this return False. Fails closed on missing material or any error.
+        """
         try:
             if intent_token.is_expired:
                 logger.warning("Token %s has expired", intent_token.token_id)
                 return False
-            if not intent_token.signature or not intent_token.plan_hash:
-                logger.warning("Token %s missing required fields", intent_token.token_id)
+
+            token_data = (intent_token.raw_token or {}).get("token") or {}
+            signed_plan_hash = token_data.get("plan_hash")
+
+            if not token_data.get("public_key") or not token_data.get("signature") or not signed_plan_hash:
+                logger.warning(
+                    "Token %s missing signature material; cannot verify",
+                    intent_token.token_id,
+                )
                 return False
-            logger.info(
-                "Token %s is valid (expires in %.1fs)",
-                intent_token.token_id,
-                intent_token.time_until_expiry,
-            )
+
+            if not verify_intent_token_signature(intent_token.raw_token):
+                logger.warning(
+                    "Token %s signature verification FAILED", intent_token.token_id
+                )
+                return False
+
+            # The plan_hash the caller relies on must be the one that was signed.
+            if intent_token.plan_hash and intent_token.plan_hash != signed_plan_hash:
+                logger.warning(
+                    "Token %s plan_hash does not match signed payload",
+                    intent_token.token_id,
+                )
+                return False
+
             return True
         except Exception as e:
             logger.error("Token verification failed: %s", e)
