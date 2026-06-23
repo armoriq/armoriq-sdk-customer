@@ -23,6 +23,7 @@ import httpx
 
 from .config import load_armoriq_config
 from .crypto_verify import verify_intent_token_signature
+from .token_usage import summarize_transcript_usage
 from .exceptions import (
     ArmorIQException,
     ConfigurationException,
@@ -1246,6 +1247,49 @@ class ArmorIQClient:
             "predicate_fails": data.get("predicate_fails", []),
             "meta": data.get("meta", {}),
         }
+
+    # ─── Token usage ─────────────────────────────────────────────────
+    # Single cross-tool path for reporting per-session LLM token usage to the
+    # dashboard. Idempotent upsert by (org, product, session, model). Best
+    # effort: never raises - returns {"ok": ...} so callers can fire-and-forget.
+
+    def record_token_usage(
+        self, product: str, session_id: str, entries: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        entries = entries if isinstance(entries, list) else []
+        if not entries:
+            return {"ok": True, "recorded": 0}
+        try:
+            response = self._retry_post(
+                f"{self.backend_endpoint}/dashboard/token-usage",
+                json={"product": product, "sessionId": session_id, "entries": entries},
+                headers={"X-API-Key": self.api_key},
+            )
+            recorded = None
+            if response.status_code < 400:
+                try:
+                    recorded = (response.json() or {}).get("recorded")
+                except Exception:
+                    recorded = None
+            return {
+                "ok": response.status_code < 400,
+                "status": response.status_code,
+                "recorded": recorded,
+            }
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+
+    def capture_transcript_tokens(
+        self, transcript_path: str, product: str, session_id: str
+    ) -> Dict[str, Any]:
+        """Parse a JSONL transcript and post its token usage in one call."""
+        entries = summarize_transcript_usage(transcript_path)
+        if not entries:
+            return {"ok": True, "recorded": 0}
+        res = self.record_token_usage(
+            product=product, session_id=session_id, entries=entries
+        )
+        return {"ok": res["ok"], "recorded": len(entries), "reason": res.get("reason")}
 
     def verify_token(self, intent_token: IntentToken) -> bool:
         """Verify an intent token: checks expiry AND cryptographically verifies
