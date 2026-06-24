@@ -15,6 +15,7 @@ import argparse
 import http.server
 import os
 import queue
+import secrets
 import socket
 import threading
 import time
@@ -72,6 +73,7 @@ def _find_free_port() -> int:
 
 def _start_callback_server(
     port: int,
+    expected_state: str,
 ) -> Tuple["queue.Queue[dict]", http.server.ThreadingHTTPServer]:
     result_q: "queue.Queue[dict]" = queue.Queue(maxsize=1)
 
@@ -80,6 +82,14 @@ def _start_callback_server(
             u = urlparse(self.path)
             if u.path == "/callback":
                 q = {k: v[0] for k, v in parse_qs(u.query).items()}
+                # Reject callbacks without the state nonce we generated. Without
+                # this, any local process or web page could hit the loopback
+                # port with ?key=<attacker> during login (key fixation).
+                if not q.get("state") or q.get("state") != expected_state:
+                    self.send_response(400)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Connection", "close")
@@ -123,8 +133,9 @@ def cmd_login(args: argparse.Namespace) -> int:
     print("")
 
     port = _find_free_port()
-    callback_url = f"http://localhost:{port}/callback"
-    result_q, srv = _start_callback_server(port)
+    state = secrets.token_hex(16)
+    callback_url = f"http://localhost:{port}/callback?state={state}"
+    result_q, srv = _start_callback_server(port, state)
 
     code_body = {"callback_url": callback_url}
     if requested_product:

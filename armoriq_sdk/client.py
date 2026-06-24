@@ -467,9 +467,9 @@ class ArmorIQClient:
                 headers={"X-API-Key": self.api_key},
                 timeout=5.0,
             )
-            if response.status_code == 401:
+            if response.status_code in (401, 403):
                 raise ConfigurationException(
-                    "Invalid API key. Please check your API key at "
+                    "Invalid or revoked API key. Please check your API key at "
                     "https://platform.armoriq.ai/dashboard/api-keys"
                 )
             elif response.status_code >= 400:
@@ -676,8 +676,10 @@ class ArmorIQClient:
                 plan_hash=data.get("plan_hash", ""),
                 plan_id=data.get("plan_id"),
                 signature=token_data.get("signature", "") if isinstance(token_data, dict) else "",
-                issued_at=now,
-                expires_at=now + validity_seconds,
+                # Prefer the server-signed timestamps so expiry doesn't depend on
+                # the client's clock at mint time (fall back to local only if absent).
+                issued_at=(token_data.get("issued_at") if isinstance(token_data, dict) else None) or now,
+                expires_at=(token_data.get("expires_at") if isinstance(token_data, dict) else None) or (now + validity_seconds),
                 policy=policy or {},
                 composite_identity=data.get("composite_identity", ""),
                 client_info=data.get("client_info"),
@@ -806,19 +808,20 @@ class ArmorIQClient:
                 "when you called capture_plan()."
             )
 
+        # Fail closed: refuse to invoke without an inclusion proof rather than
+        # sending an unproven request and relying on the proxy to reject it.
         if not merkle_proof:
             if intent_token.step_proofs and len(intent_token.step_proofs) > step_index:
                 merkle_proof = intent_token.step_proofs[step_index]
                 logger.debug("Using Merkle proof from CSRG-IAP for step %s", step_index)
             else:
-                logger.warning(
-                    "No Merkle proof available for step %s. step_proofs length: %s",
-                    step_index,
-                    len(intent_token.step_proofs or []),
+                raise MCPInvocationException(
+                    f"No CSRG Merkle proof available for step {step_index} "
+                    f"(step_proofs length: {len(intent_token.step_proofs or [])}). "
+                    "Refusing to invoke without an inclusion proof (fail-closed)."
                 )
 
-        if merkle_proof:
-            headers["X-CSRG-Proof"] = json.dumps(merkle_proof, separators=(",", ":"))
+        headers["X-CSRG-Proof"] = json.dumps(merkle_proof, separators=(",", ":"))
 
         headers["X-CSRG-Path"] = f"/steps/[{step_index}]/action"
 
@@ -1451,8 +1454,19 @@ class ArmorIQClient:
                 body = response.json()
                 if body.get("role"):
                     return {"role": body["role"], "limit": body.get("limit", 0)}
-        except Exception:
-            pass
+            logger.warning(
+                "resolve_user_role: backend returned %s; defaulting to "
+                "least-privileged role (agent_user, limit 0).",
+                response.status_code,
+            )
+        except Exception as e:
+            logger.warning(
+                "resolve_user_role failed (%s); defaulting to least-privileged "
+                "role (agent_user, limit 0).",
+                e,
+            )
+        # Fail closed: least-privileged role + zero limit. The backend is the
+        # authority on delegation; never assume elevated role on resolution failure.
         return {"role": "agent_user", "limit": 0}
 
     def create_delegation_request(

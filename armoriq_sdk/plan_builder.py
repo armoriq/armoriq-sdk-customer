@@ -85,12 +85,15 @@ def hash_tool_calls(
     Stable hash over a tool-calls list — used by ``ArmorIQSession`` to skip
     re-minting when the LLM re-emits the same plan in the same turn.
 
-    Uses the same JSON canonicalization as ``JSON.stringify`` in TS
-    (no key sorting), so TS and Python produce matching digests.
+    Uses canonical JSON (recursively sorted keys, compact, ensure_ascii) so key
+    ordering can't change the digest, and so TS (shared canonicalJson) and Python
+    produce matching digests.
     """
     canonical_list = [
         {"name": _as_tool_call(tc).name, "args": _as_tool_call(tc).args or {}}
         for tc in tool_calls
     ]
-    canonical = json.dumps(canonical_list, separators=(",", ":"))
+    canonical = json.dumps(
+        canonical_list, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
