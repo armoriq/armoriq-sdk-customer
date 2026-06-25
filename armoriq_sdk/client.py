@@ -22,7 +22,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 import httpx
 
 from .config import load_armoriq_config
+from .crypto_verify import verify_intent_token_signature
+from .token_usage import summarize_transcript_usage
 from .exceptions import (
+    ArmorIQException,
     ConfigurationException,
     DelegationException,
     IntentMismatchException,
@@ -218,6 +221,19 @@ class ArmorIQClient:
             mcp_credentials
         )
 
+        logger.info(
+            "ArmorIQ SDK initialized: mode=%s, user=%s, agent=%s, iap=%s, proxy=%s, backend=%s",
+            os.getenv("ARMORIQ_ENV", "production" if use_production else "local").lower(),
+            self.user_id,
+            self.agent_id,
+            self.iap_endpoint,
+            self.default_proxy_endpoint,
+            self.backend_endpoint,
+        )
+
+        if not _skip_api_key_validation:
+            self._validate_api_key()
+
     # ─── Retry helpers ─────────────────────────────────────────────────
     # Apply exponential backoff (1s → 4s capped) on 5xx and network errors.
     # 4xx responses are passed through unchanged — caller decides how to
@@ -266,21 +282,6 @@ class ArmorIQClient:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("retry loop exited without a result")
-
-        logger.info(
-            "ArmorIQ SDK initialized: mode=%s, user=%s, agent=%s, iap=%s, "
-            "proxy=%s, backend=%s, api_key=%s",
-            os.getenv("ARMORIQ_ENV", "production" if use_production else "local").lower(),
-            self.user_id,
-            self.agent_id,
-            self.iap_endpoint,
-            self.default_proxy_endpoint,
-            self.backend_endpoint,
-            "***" + self.api_key[-8:],
-        )
-
-        if not _skip_api_key_validation:
-            self._validate_api_key()
 
     @property
     def proxy_endpoint(self) -> str:
@@ -466,9 +467,9 @@ class ArmorIQClient:
                 headers={"X-API-Key": self.api_key},
                 timeout=5.0,
             )
-            if response.status_code == 401:
+            if response.status_code in (401, 403):
                 raise ConfigurationException(
-                    "Invalid API key. Please check your API key at "
+                    "Invalid or revoked API key. Please check your API key at "
                     "https://platform.armoriq.ai/dashboard/api-keys"
                 )
             elif response.status_code >= 400:
@@ -675,8 +676,10 @@ class ArmorIQClient:
                 plan_hash=data.get("plan_hash", ""),
                 plan_id=data.get("plan_id"),
                 signature=token_data.get("signature", "") if isinstance(token_data, dict) else "",
-                issued_at=now,
-                expires_at=now + validity_seconds,
+                # Prefer the server-signed timestamps so expiry doesn't depend on
+                # the client's clock at mint time (fall back to local only if absent).
+                issued_at=(token_data.get("issued_at") if isinstance(token_data, dict) else None) or now,
+                expires_at=(token_data.get("expires_at") if isinstance(token_data, dict) else None) or (now + validity_seconds),
                 policy=policy or {},
                 composite_identity=data.get("composite_identity", ""),
                 client_info=data.get("client_info"),
@@ -805,19 +808,20 @@ class ArmorIQClient:
                 "when you called capture_plan()."
             )
 
+        # Fail closed: refuse to invoke without an inclusion proof rather than
+        # sending an unproven request and relying on the proxy to reject it.
         if not merkle_proof:
             if intent_token.step_proofs and len(intent_token.step_proofs) > step_index:
                 merkle_proof = intent_token.step_proofs[step_index]
                 logger.debug("Using Merkle proof from CSRG-IAP for step %s", step_index)
             else:
-                logger.warning(
-                    "No Merkle proof available for step %s. step_proofs length: %s",
-                    step_index,
-                    len(intent_token.step_proofs or []),
+                raise MCPInvocationException(
+                    f"No CSRG Merkle proof available for step {step_index} "
+                    f"(step_proofs length: {len(intent_token.step_proofs or [])}). "
+                    "Refusing to invoke without an inclusion proof (fail-closed)."
                 )
 
-        if merkle_proof:
-            headers["X-CSRG-Proof"] = json.dumps(merkle_proof, separators=(",", ":"))
+        headers["X-CSRG-Proof"] = json.dumps(merkle_proof, separators=(",", ":"))
 
         headers["X-CSRG-Path"] = f"/steps/[{step_index}]/action"
 
@@ -827,6 +831,24 @@ class ArmorIQClient:
         headers["X-CSRG-Value-Digest"] = hashlib.sha256(
             value_str.encode("utf-8")
         ).hexdigest()
+
+        # Subtree delegation envelope: when this token was minted by
+        # delegate_subtree(), attach the inclusion proof + subtree root so the
+        # proxy's PEP can verify the child's authority chains to the parent root
+        # and reject calls outside the subtree.
+        subtree = intent_token.subtree_delegation
+        if isinstance(subtree, dict):
+            if isinstance(subtree.get("subtree_path"), str):
+                headers["X-CSRG-Subtree-Path"] = subtree["subtree_path"]
+            if subtree.get("subtree_root"):
+                headers["X-CSRG-Subtree-Root"] = subtree["subtree_root"]
+            if subtree.get("parent_plan_hash"):
+                headers["X-CSRG-Parent-Root"] = subtree["parent_plan_hash"]
+            if subtree.get("inclusion_proof"):
+                proof_json = json.dumps(subtree["inclusion_proof"], separators=(",", ":"))
+                headers["X-CSRG-Subtree-Proof"] = base64.b64encode(
+                    proof_json.encode("utf-8")
+                ).decode("ascii")
 
         try:
             start = time.time()
@@ -989,9 +1011,12 @@ class ArmorIQClient:
         if subtask:
             payload["subtask"] = subtask
 
+        # NOTE: delegate() is legacy. Prefer delegate_subtree() for subtree-bounded
+        # delegation. The /delegation/create route was removed; the live delegation
+        # endpoint is /iap/trust/delegate on the backend.
         try:
             response = self.http_client.post(
-                f"{self.iap_endpoint}/delegation/create",
+                f"{self.backend_endpoint}/iap/trust/delegate",
                 json=payload,
                 timeout=10.0,
             )
@@ -1049,20 +1074,261 @@ class ArmorIQClient:
         except Exception as e:
             raise DelegationException(f"Delegation failed: {e}", target_agent=target_agent)
 
+    # -------------------- Trust update primitives --------------------
+    # Thin client methods over conmap-auto's /iap/trust/* API. All fail closed.
+
+    def revoke(
+        self,
+        intent_token: IntentToken,
+        reason: str,
+        cascade: bool = True,
+        plan_id: Optional[str] = None,
+        intent_reference: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Revoke an issued intent token. Raises on failure (fail closed)."""
+        token = intent_token.raw_token
+        if isinstance(token, dict) and "token" in token:
+            token = token["token"]
+        body = {
+            "token": token,
+            "reason": reason,
+            "cascade": cascade,
+            "planId": plan_id or intent_token.plan_id,
+            "intentReference": intent_reference,
+        }
+        try:
+            response = self._retry_post(
+                f"{self.backend_endpoint}/iap/trust/revoke", json=body, timeout=10.0
+            )
+            if response.status_code >= 400:
+                raise DelegationException(
+                    f"Revoke failed for {intent_token.token_id}: {response.text}",
+                    status_code=response.status_code,
+                )
+            return response.json()
+        except DelegationException:
+            raise
+        except Exception as e:
+            raise DelegationException(f"Revoke failed for {intent_token.token_id}: {e}")
+
+    def reanchor(
+        self,
+        intent_token: IntentToken,
+        updated_plan: Dict[str, Any],
+        reason: Optional[str] = None,
+        plan_id: Optional[str] = None,
+        intent_reference: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Re-anchor a plan that changed mid-execution. Raises on failure."""
+        body = {
+            "newPlan": updated_plan,
+            "reason": reason,
+            "planId": plan_id or intent_token.plan_id,
+            "intentReference": intent_reference,
+        }
+        try:
+            response = self._retry_post(
+                f"{self.backend_endpoint}/iap/trust/reanchor", json=body, timeout=10.0
+            )
+            if response.status_code >= 400:
+                raise DelegationException(
+                    f"Reanchor failed for {intent_token.token_id}: {response.text}",
+                    status_code=response.status_code,
+                )
+            return response.json()
+        except DelegationException:
+            raise
+        except Exception as e:
+            raise DelegationException(f"Reanchor failed for {intent_token.token_id}: {e}")
+
+    def delegate_subtree(
+        self,
+        intent_token: IntentToken,
+        *,
+        delegate_public_key: str,
+        subtree_path: str,
+        validity_seconds: int = 3600,
+        parent_plan: Optional[Dict[str, Any]] = None,
+        plan_id: Optional[str] = None,
+        intent_reference: Optional[str] = None,
+        target_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Issue a subtree-bounded child token plus a Merkle inclusion proof
+        linking the subtree root to the parent plan root. Returns trust_id,
+        delta, inclusion_proof, subtree_root, and a delegated_token whose
+        invoke() auto-attaches the X-CSRG-Subtree-* headers. Raises on failure.
+        """
+        parent_token = intent_token.raw_token
+        if isinstance(parent_token, dict) and "token" in parent_token:
+            parent_token = parent_token["token"]
+        body = {
+            "parentToken": parent_token,
+            "delegatePublicKey": delegate_public_key,
+            "validitySeconds": validity_seconds,
+            "parentPlan": parent_plan,
+            "subtreePath": subtree_path,
+            "planId": plan_id or intent_token.plan_id,
+            "intentReference": intent_reference,
+        }
+        try:
+            response = self._retry_post(
+                f"{self.backend_endpoint}/iap/trust/delegate", json=body, timeout=10.0
+            )
+            if response.status_code >= 400:
+                raise DelegationException(
+                    f"delegate_subtree failed: {response.text}",
+                    target_agent=target_agent,
+                    status_code=response.status_code,
+                )
+            data = response.json() or {}
+            payload = (data.get("delta") or {}).get("payload") or {}
+            inclusion_proof = payload.get("inclusion_proof") or []
+            subtree_root = payload.get("subtree_node_hash") or ""
+            parent_plan_hash = payload.get("parent_plan_hash") or intent_token.plan_hash
+            delegated_token = intent_token.model_copy(
+                update={
+                    "subtree_delegation": {
+                        "subtree_path": subtree_path,
+                        "subtree_root": subtree_root,
+                        "parent_plan_hash": parent_plan_hash,
+                        "inclusion_proof": inclusion_proof,
+                        "parent_token_id": intent_token.token_id,
+                    }
+                }
+            )
+            return {
+                "trust_id": data.get("trustId"),
+                "delta": data.get("delta"),
+                "inclusion_proof": inclusion_proof,
+                "subtree_root": subtree_root,
+                "delegated_token": delegated_token,
+            }
+        except DelegationException:
+            raise
+        except Exception as e:
+            raise DelegationException(
+                f"delegate_subtree failed: {e}", target_agent=target_agent
+            )
+
+    def refine(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """PAP plan-assurance refinement. Fails CLOSED: any transport error,
+        non-2xx, or malformed response raises - it never silently accepts a plan.
+        """
+        payload = {
+            "agent_id": req.get("agent_id"),
+            "user_prompt": req.get("user_prompt"),
+            "tool_calls": req.get("tool_calls"),
+            "authority_snapshot": req.get("authority_snapshot"),
+        }
+        try:
+            response = self.http_client.post(
+                f"{self.backend_endpoint}/iap/sdk/preflight",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "X-API-Key": self.api_key,
+                },
+                timeout=30.0,
+            )
+        except Exception as e:
+            raise ArmorIQException(f"pap refine() transport error (fail-closed): {e}")
+        if response.status_code < 200 or response.status_code >= 300:
+            raise ArmorIQException(
+                f"pap refine() failed (fail-closed): HTTP {response.status_code}: {response.text}"
+            )
+        try:
+            data = response.json()
+        except Exception:
+            data = None
+        if not isinstance(data, dict) or not data.get("decision"):
+            raise ArmorIQException("pap refine() got malformed response (fail-closed)")
+        return {
+            "decision": data.get("decision"),
+            "intent_id": data.get("intent_id"),
+            "violations": data.get("violations", []),
+            "offending_interfaces": data.get("offending_interfaces", []),
+            "predicate_fails": data.get("predicate_fails", []),
+            "meta": data.get("meta", {}),
+        }
+
+    # ─── Token usage ─────────────────────────────────────────────────
+    # Single cross-tool path for reporting per-session LLM token usage to the
+    # dashboard. Idempotent upsert by (org, product, session, model). Best
+    # effort: never raises - returns {"ok": ...} so callers can fire-and-forget.
+
+    def record_token_usage(
+        self, product: str, session_id: str, entries: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        entries = entries if isinstance(entries, list) else []
+        if not entries:
+            return {"ok": True, "recorded": 0}
+        try:
+            response = self._retry_post(
+                f"{self.backend_endpoint}/dashboard/token-usage",
+                json={"product": product, "sessionId": session_id, "entries": entries},
+                headers={"X-API-Key": self.api_key},
+            )
+            recorded = None
+            if response.status_code < 400:
+                try:
+                    recorded = (response.json() or {}).get("recorded")
+                except Exception:
+                    recorded = None
+            return {
+                "ok": response.status_code < 400,
+                "status": response.status_code,
+                "recorded": recorded,
+            }
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+
+    def capture_transcript_tokens(
+        self, transcript_path: str, product: str, session_id: str
+    ) -> Dict[str, Any]:
+        """Parse a JSONL transcript and post its token usage in one call."""
+        entries = summarize_transcript_usage(transcript_path)
+        if not entries:
+            return {"ok": True, "recorded": 0}
+        res = self.record_token_usage(
+            product=product, session_id=session_id, entries=entries
+        )
+        return {"ok": res["ok"], "recorded": len(entries), "reason": res.get("reason")}
+
     def verify_token(self, intent_token: IntentToken) -> bool:
-        """Local-only token validation (expiry + required-field checks)."""
+        """Verify an intent token: checks expiry AND cryptographically verifies
+        the Ed25519 signature over the canonical signed payload (which binds
+        plan_hash). Any tampering with the signed fields - including plan_hash -
+        makes this return False. Fails closed on missing material or any error.
+        """
         try:
             if intent_token.is_expired:
                 logger.warning("Token %s has expired", intent_token.token_id)
                 return False
-            if not intent_token.signature or not intent_token.plan_hash:
-                logger.warning("Token %s missing required fields", intent_token.token_id)
+
+            token_data = (intent_token.raw_token or {}).get("token") or {}
+            signed_plan_hash = token_data.get("plan_hash")
+
+            if not token_data.get("public_key") or not token_data.get("signature") or not signed_plan_hash:
+                logger.warning(
+                    "Token %s missing signature material; cannot verify",
+                    intent_token.token_id,
+                )
                 return False
-            logger.info(
-                "Token %s is valid (expires in %.1fs)",
-                intent_token.token_id,
-                intent_token.time_until_expiry,
-            )
+
+            if not verify_intent_token_signature(intent_token.raw_token):
+                logger.warning(
+                    "Token %s signature verification FAILED", intent_token.token_id
+                )
+                return False
+
+            # The plan_hash the caller relies on must be the one that was signed.
+            if intent_token.plan_hash and intent_token.plan_hash != signed_plan_hash:
+                logger.warning(
+                    "Token %s plan_hash does not match signed payload",
+                    intent_token.token_id,
+                )
+                return False
+
             return True
         except Exception as e:
             logger.error("Token verification failed: %s", e)
@@ -1188,8 +1454,19 @@ class ArmorIQClient:
                 body = response.json()
                 if body.get("role"):
                     return {"role": body["role"], "limit": body.get("limit", 0)}
-        except Exception:
-            pass
+            logger.warning(
+                "resolve_user_role: backend returned %s; defaulting to "
+                "least-privileged role (agent_user, limit 0).",
+                response.status_code,
+            )
+        except Exception as e:
+            logger.warning(
+                "resolve_user_role failed (%s); defaulting to least-privileged "
+                "role (agent_user, limit 0).",
+                e,
+            )
+        # Fail closed: least-privileged role + zero limit. The backend is the
+        # authority on delegation; never assume elevated role on resolution failure.
         return {"role": "agent_user", "limit": 0}
 
     def create_delegation_request(

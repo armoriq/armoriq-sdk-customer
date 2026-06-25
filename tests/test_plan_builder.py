@@ -98,15 +98,22 @@ class TestHashToolCalls:
         assert hash_tool_calls(a) != hash_tool_calls(b)
 
     def test_matches_ts_canonicalization(self):
-        """Hash must use JSON.stringify semantics (no key sort, compact separators)."""
+        """Hash must use canonical JSON (sorted keys, compact separators,
+        ensure_ascii) so it matches the TS SDK's shared canonicalJson."""
         calls = [ToolCall(name="Stripe__charge", args={"amount": 100})]
         expected = hashlib.sha256(
             json.dumps(
                 [{"name": "Stripe__charge", "args": {"amount": 100}}],
+                sort_keys=True,
                 separators=(",", ":"),
+                ensure_ascii=True,
             ).encode("utf-8")
         ).hexdigest()
         assert hash_tool_calls(calls) == expected
+        # Pinned cross-SDK vector: TS hashToolCalls produces the same digest.
+        assert hash_tool_calls(calls) == (
+            "6e73175f93d534cda8b74c9dc901202b1fe01bee285c5a0f7c4373a4b94ec7c9"
+        )
 
     def test_accepts_dict_form(self):
         calls = [{"name": "a__b", "args": {"x": 1}}]

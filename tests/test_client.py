@@ -60,11 +60,35 @@ def sample_plan():
     )
 
 
+from cryptography.hazmat.primitives import serialization as _ser
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _Ed
+from armoriq_sdk.crypto_verify import canonical_json as _cj
+
+_TEST_SK = _Ed.generate()
+_TEST_PK_HEX = _TEST_SK.public_key().public_bytes(
+    _ser.Encoding.Raw, _ser.PublicFormat.Raw
+).hex()
+
+
+def _signed_token_dict(plan_hash: str = "hash_1") -> dict:
+    """A csrg token dict with a genuine Ed25519 signature over the canonical payload."""
+    payload = {
+        "plan_hash": plan_hash,
+        "issued_at": 1700000000,
+        "expires_at": 1700003600,
+        "policy": {},
+        "identity": "ci",
+        "public_key": _TEST_PK_HEX,
+        "version": "1.0",
+    }
+    return {**payload, "signature": _TEST_SK.sign(_cj(payload)).hex()}
+
+
 def _make_token(action: str = "do_thing", mcp: str = "test-mcp") -> IntentToken:
     now = datetime.now().timestamp()
     raw = {
         "plan": {"goal": "g", "steps": [{"action": action, "mcp": mcp}]},
-        "token": {"signature": "sig"},
+        "token": _signed_token_dict(),
         "plan_hash": "hash_1",
     }
     return IntentToken(

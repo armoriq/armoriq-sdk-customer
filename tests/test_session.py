@@ -12,6 +12,28 @@ from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
+from cryptography.hazmat.primitives import serialization as _ser
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _Ed
+
+from armoriq_sdk.crypto_verify import canonical_json as _cj
+
+_TEST_SK = _Ed.generate()
+_TEST_PK_HEX = _TEST_SK.public_key().public_bytes(
+    _ser.Encoding.Raw, _ser.PublicFormat.Raw
+).hex()
+
+
+def _signed_token_dict(plan_hash: str = "hash_1") -> dict:
+    payload = {
+        "plan_hash": plan_hash,
+        "issued_at": 1700000000,
+        "expires_at": 1700003600,
+        "policy": {},
+        "identity": "ci_1",
+        "public_key": _TEST_PK_HEX,
+        "version": "1.0",
+    }
+    return {**payload, "signature": _TEST_SK.sign(_cj(payload)).hex()}
 
 from armoriq_sdk import (
     ArmorIQClient,
@@ -54,7 +76,7 @@ def _make_token(
         composite_identity="ci_1",
         policy_validation=policy_validation,
         policy_snapshot=policy_snapshot,
-        raw_token={"plan": {"steps": steps}, "token": {}},
+        raw_token={"plan": {"steps": steps}, "token": _signed_token_dict()},
         total_steps=len(steps),
     )
 

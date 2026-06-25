@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, 
 
 import httpx
 
+from .crypto_verify import verify_intent_token_signature
 from .models import IntentToken, ToolCall
 from .plan_builder import (
     ToolNameParser,
@@ -153,6 +154,14 @@ class ArmorIQSession:
 
         if self._current_token.is_expired:
             return EnforceResult(allowed=False, action="block", reason="token-expired")
+
+        # The local decision is read from the token's policy fields, so the token
+        # must be cryptographically authentic first - otherwise a forged token
+        # could assert an arbitrary allowlist. Fail closed if the signature is bad.
+        if not verify_intent_token_signature(self._current_token.raw_token):
+            return EnforceResult(
+                allowed=False, action="block", reason="token-signature-invalid"
+            )
 
         mcp, action = self._tool_name_parser(tool_name)
         in_plan = (
@@ -307,7 +316,7 @@ class ArmorIQSession:
                 timeout=10.0,
             )
             data = response.json() or {}
-            allowed = data.get("allowed") is not False
+            allowed = data.get("allowed") is True
             action_decision = data.get("enforcementAction") or ("allow" if allowed else "block")
             matched = (data.get("matchedPolicy") or {}).get("name")
             if action_decision == "hold":
@@ -329,8 +338,10 @@ class ArmorIQSession:
                 matched_policy=matched,
             )
         except Exception as e:
-            logger.warning("enforce_sdk() failed: %s. Allowing tool call.", e)
-            return EnforceResult(allowed=True, action="allow", reason="enforce-unavailable")
+            logger.error("enforce_sdk() failed: %s. Blocking tool call (fail-closed).", e)
+            return EnforceResult(
+                allowed=False, action="block", reason=f"enforce-unavailable: {e}"
+            )
 
     def enforce(
         self, tool_name: str, tool_args: Dict[str, Any]
@@ -376,31 +387,35 @@ class ArmorIQSession:
                 },
                 timeout=10.0,
             )
-            if response.status_code == 403:
-                data = {}
-                try:
-                    data = response.json() or {}
-                except Exception:
-                    pass
+            data = {}
+            try:
+                data = response.json() or {}
+            except Exception:
+                pass
+            raw_policy = data.get("matched_policy") or data.get("matchedPolicy")
+            policy_name = raw_policy.get("name") if isinstance(raw_policy, dict) else raw_policy
+            # Fail closed: only an explicit allow from a 2xx response permits the call.
+            # Any error status (403 or otherwise) or an ambiguous body blocks.
+            if response.status_code >= 400:
                 return EnforceResult(
                     allowed=False,
                     action=data.get("action") or "block",
-                    reason=data.get("reason") or data.get("message"),
-                    matched_policy=data.get("matched_policy"),
+                    reason=data.get("reason") or data.get("message") or f"enforce-rejected: HTTP {response.status_code}",
+                    matched_policy=policy_name,
                 )
-            data = response.json() or {}
-            raw_policy = data.get("matched_policy") or data.get("matchedPolicy")
-            policy_name = raw_policy.get("name") if isinstance(raw_policy, dict) else raw_policy
+            allowed_flag = data.get("allowed") is True
             return EnforceResult(
-                allowed=data.get("allowed") is not False,
-                action=data.get("enforcementAction") or data.get("action") or ("block" if data.get("allowed") is False else "allow"),
+                allowed=allowed_flag,
+                action=data.get("enforcementAction") or data.get("action") or ("allow" if allowed_flag else "block"),
                 reason=data.get("reason"),
                 delegation_id=data.get("delegation_id"),
                 matched_policy=policy_name,
             )
-        except httpx.HTTPError as e:
-            logger.warning("enforce() failed: %s. Allowing tool call.", e)
-            return EnforceResult(allowed=True, action="allow", reason="enforce-unavailable")
+        except Exception as e:
+            logger.error("enforce() failed: %s. Blocking tool call (fail-closed).", e)
+            return EnforceResult(
+                allowed=False, action="block", reason=f"enforce-unavailable: {e}"
+            )
 
     def check(
         self,
