@@ -37,6 +37,11 @@ class IntentToken(BaseModel):
     policy_snapshot: Optional[List[Dict[str, Any]]] = Field(
         None, description="OPA-formatted policy snapshot for proxy → OPA enforcement"
     )
+    subtree_delegation: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Subtree-delegation envelope (set by delegate_subtree); makes "
+        "invoke() attach the X-CSRG-Subtree-* headers for proxy scope confinement",
+    )
 
     @property
     def is_expired(self) -> bool:
