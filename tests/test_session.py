@@ -308,3 +308,44 @@ class TestSessionStart:
         client = _client_with_token(_make_token())
         session = client.start_session(SessionOptions(mode="proxy"))
         assert session.current_mode == "proxy"
+
+
+class TestHandleHold:
+    """SDK-mode hold path: delegation payload must carry requester_role/limit + safe_amount
+    (parity with the TS SDK handleHold)."""
+
+    def _hold_session(self, captured):
+        from unittest.mock import MagicMock
+
+        client = _client_with_token(_make_token())
+        client.check_approved_delegation = MagicMock(return_value=None)
+
+        def _create(params):
+            captured["params"] = params
+            return MagicMock(delegation_id="del_1", status="pending", expires_at="")
+
+        client.create_delegation_request = MagicMock(side_effect=_create)
+        session = client.start_session()
+        session.start_plan([ToolCall(name="Stripe__charge", args={"amount": 500})])
+        return session
+
+    def test_sends_requester_role_limit_and_amount(self):
+        from armoriq_sdk.session import EnforceResult
+
+        captured = {}
+        session = self._hold_session(captured)
+        hold = EnforceResult(allowed=False, action="hold", reason="needs approval")
+        session._handle_hold("Stripe__charge", {"amount": 500}, hold, user_email="u@acme.com")
+        p = captured["params"]
+        assert p.requester_role == "agent_user"
+        assert p.requester_limit == 0
+        assert p.amount == 500
+
+    def test_safe_amount_clamped_to_minimum(self):
+        from armoriq_sdk.session import EnforceResult
+
+        captured = {}
+        session = self._hold_session(captured)
+        hold = EnforceResult(allowed=False, action="hold", reason="needs approval")
+        session._handle_hold("Stripe__charge", {}, hold, user_email="u@acme.com")
+        assert captured["params"].amount == 0.01
