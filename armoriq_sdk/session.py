@@ -530,8 +530,8 @@ class ArmorIQSession:
 
         amount = self._extract_amount(tool_args)
         # conmap-auto's delegation DTO requires amount + requesterRole + requesterLimit.
-        # Floor the amount so the approved-delegation lookup matches the created row
-        # (mirrors the TS SDK hold path).
+        # Clamp the amount to a 0.01 minimum so the approved-delegation lookup and the
+        # created row use the same value (mirrors the TS SDK hold path).
         safe_amount = amount if (isinstance(amount, (int, float)) and amount >= 0.01) else 0.01
         try:
             approved = self._client.check_approved_delegation(email, action, safe_amount)

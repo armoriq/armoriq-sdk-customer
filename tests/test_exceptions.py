@@ -15,6 +15,7 @@ from armoriq_sdk.exceptions import (
     MCPInvocationException,
     PolicyBlockedException,
     PolicyHoldException,
+    RevokedTokenError,
     TokenExpiredException,
 )
 
@@ -161,3 +162,22 @@ class TestExceptionUsage:
         ):
             with pytest.raises(ArmorIQException):
                 raise exc_cls("x")
+
+
+class TestRevokedTokenError:
+    def test_inherits_base_matching_ts(self):
+        # TS RevokedTokenError extends ArmorIQException (not InvalidTokenException);
+        # Python mirrors that for cross-SDK parity.
+        exc = RevokedTokenError("revoked")
+        assert isinstance(exc, ArmorIQException)
+        assert str(exc) == "revoked"
+
+    def test_carries_token_id_and_reason(self):
+        exc = RevokedTokenError("revoked", token_id="tok_9", reason="rotated")
+        assert exc.token_id == "tok_9"
+        assert exc.reason == "rotated"
+
+    def test_fields_default_to_none(self):
+        exc = RevokedTokenError("revoked")
+        assert exc.token_id is None
+        assert exc.reason is None
