@@ -308,6 +308,11 @@ class ArmorIQSession:
                     "intent_token": self._current_token.raw_token,
                     "policy_snapshot": self._current_token.policy_snapshot,
                     "user_email": user_email,
+                    "agent_id": (
+                        self._client.agent_id
+                        if self._client.agent_id and self._client.agent_id != "__sdk_multiuser__"
+                        else None
+                    ),
                 },
                 headers={
                     "X-API-Key": self._client.api_key,
@@ -524,8 +529,12 @@ class ArmorIQSession:
         resolved_mcp = self._mcp_by_action.get(action, mcp)
 
         amount = self._extract_amount(tool_args)
+        # conmap-auto's delegation DTO requires amount + requesterRole + requesterLimit.
+        # Clamp the amount to a 0.01 minimum so the approved-delegation lookup and the
+        # created row use the same value (mirrors the TS SDK hold path).
+        safe_amount = amount if (isinstance(amount, (int, float)) and amount >= 0.01) else 0.01
         try:
-            approved = self._client.check_approved_delegation(email, action, amount or 0)
+            approved = self._client.check_approved_delegation(email, action, safe_amount)
             if approved:
                 try:
                     if approved.delegation_id:
@@ -549,8 +558,10 @@ class ArmorIQSession:
                     tool=action,
                     action=action,
                     arguments=tool_args,
-                    amount=amount,
+                    amount=safe_amount,
                     requester_email=email,
+                    requester_role="agent_user",
+                    requester_limit=0,
                     domain=resolved_mcp,
                     plan_id=(self._current_token.plan_id if self._current_token else None),
                     intent_reference=(self._current_token.token_id if self._current_token else None),

@@ -580,7 +580,7 @@ class ArmorIQClient:
         )
 
         payload: Dict[str, Any] = {
-            "user_id": self.user_id,
+            "user_id": self.user_email_override or self.user_id,
             "agent_id": self.agent_id,
             "context_id": self.context_id,
             "plan": plan_capture.plan,

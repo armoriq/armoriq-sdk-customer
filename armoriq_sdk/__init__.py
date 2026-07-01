@@ -31,6 +31,7 @@ from .exceptions import (
     MCPInvocationException,
     PolicyBlockedException,
     PolicyHoldException,
+    RevokedTokenError,
     TokenExpiredException,
 )
 from .models import (
@@ -54,7 +55,7 @@ from .models import (
     ToolSemanticEntry,
 )
 
-__version__ = "0.3.9"
+__version__ = "0.4.3"
 VERSION = __version__
 __author__ = "ArmorIQ Team"
 AUTHOR = __author__
@@ -84,6 +85,7 @@ __all__ = [
     "ConfigurationException",
     "PolicyBlockedException",
     "PolicyHoldException",
+    "RevokedTokenError",
     # Models
     "IntentToken",
     "PlanCapture",
