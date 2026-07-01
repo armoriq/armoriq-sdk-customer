@@ -156,3 +156,16 @@ class ConfigurationException(ArmorIQException):
     """
 
     pass
+
+
+class RevokedTokenError(ArmorIQException):
+    """
+    Raised when an intent token has been revoked by the IAP backend and the
+    proxy refused to execute the action. The proxy returns 401 with header
+    X-Armoriq-Revoked: true. Catch this to refresh the token and retry.
+    """
+
+    def __init__(self, message, token_id=None, reason=None):
+        super().__init__(message)
+        self.token_id = token_id
+        self.reason = reason

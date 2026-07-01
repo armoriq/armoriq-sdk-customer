@@ -31,6 +31,7 @@ from .exceptions import (
     MCPInvocationException,
     PolicyBlockedException,
     PolicyHoldException,
+    RevokedTokenError,
     TokenExpiredException,
 )
 from .models import (
@@ -84,6 +85,7 @@ __all__ = [
     "ConfigurationException",
     "PolicyBlockedException",
     "PolicyHoldException",
+    "RevokedTokenError",
     # Models
     "IntentToken",
     "PlanCapture",
